@@ -1,0 +1,393 @@
+"""
+apps/access/capabilities.py
+
+All capability strings as constants: "resource.action"
+Role → capability mappings for all Logicon internal roles and client user.
+"""
+
+# ─── Individual capability constants ─────────────────────────────────────────
+
+# Organization
+ORGANIZATION_READ = "organization.read"
+ORGANIZATION_CREATE = "organization.create"
+ORGANIZATION_UPDATE = "organization.update"
+ORGANIZATION_DELETE = "organization.delete"
+
+# User
+USER_READ = "user.read"
+USER_CREATE = "user.create"
+USER_UPDATE = "user.update"
+USER_DELETE = "user.delete"
+
+# Role
+ROLE_READ = "role.read"
+ROLE_CREATE = "role.create"
+ROLE_UPDATE = "role.update"
+ROLE_DELETE = "role.delete"
+
+# Module
+MODULE_READ = "module.read"
+MODULE_CREATE = "module.create"
+MODULE_UPDATE = "module.update"
+MODULE_DELETE = "module.delete"
+MODULE_MANAGE = "module.manage_module"
+
+# Client
+CLIENT_READ = "client.read"
+CLIENT_CREATE = "client.create"
+CLIENT_UPDATE = "client.update"
+CLIENT_DELETE = "client.delete"
+
+# Site
+SITE_READ = "site.read"
+SITE_CREATE = "site.create"
+SITE_UPDATE = "site.update"
+SITE_DELETE = "site.delete"
+
+# Site Role Requirement
+SITE_ROLE_REQ_READ = "site_role_requirement.read"
+SITE_ROLE_REQ_CREATE = "site_role_requirement.create"
+SITE_ROLE_REQ_UPDATE = "site_role_requirement.update"
+SITE_ROLE_REQ_DELETE = "site_role_requirement.delete"
+
+# Job Role
+JOB_ROLE_READ = "job_role.read"
+JOB_ROLE_CREATE = "job_role.create"
+JOB_ROLE_UPDATE = "job_role.update"
+JOB_ROLE_DELETE = "job_role.delete"
+
+# Campaign
+CAMPAIGN_READ = "campaign.read"
+CAMPAIGN_CREATE = "campaign.create"
+CAMPAIGN_UPDATE = "campaign.update"
+CAMPAIGN_DELETE = "campaign.delete"
+
+# Submission
+SUBMISSION_READ = "submission.read"
+SUBMISSION_UPDATE = "submission.update"
+SUBMISSION_DELETE = "submission.delete"
+
+# Candidate
+CANDIDATE_READ = "candidate.read"
+CANDIDATE_CREATE = "candidate.create"
+CANDIDATE_UPDATE = "candidate.update"
+
+# Candidate shortlist
+CANDIDATE_SHORTLIST = "candidate.shortlist"
+
+# Resume
+RESUME_READ = "resume.read"
+RESUME_VIEW = "resume.view_resume"
+
+# MRF
+MRF_READ = "mrf.read"
+MRF_CREATE = "mrf.create"
+MRF_UPDATE = "mrf.update"
+MRF_DELETE = "mrf.delete"
+MRF_APPROVE = "mrf.approve"
+MRF_REJECT = "mrf.reject"
+
+# Workflow
+WORKFLOW_READ = "workflow.read"
+WORKFLOW_CREATE = "workflow.create"
+WORKFLOW_START = "workflow.start_workflow"
+WORKFLOW_APPROVE = "workflow.approve"
+WORKFLOW_REJECT = "workflow.reject"
+WORKFLOW_REASSIGN = "workflow.reassign"
+
+# Wage
+WAGE_READ = "wage.read"
+WAGE_CREATE = "wage.create"
+WAGE_UPDATE = "wage.update"
+
+# Budget
+BUDGET_READ = "budget.read"
+BUDGET_CREATE = "budget.create"
+
+# Interview
+INTERVIEW_READ = "interview.read"
+INTERVIEW_CREATE = "interview.create"
+INTERVIEW_MANAGE = "interview.manage"
+
+# Offer
+OFFER_READ = "offer.read"
+OFFER_CREATE = "offer.create"
+OFFER_APPROVE = "offer.approve"
+
+# Hiring Application
+HIRING_APP_READ = "hiring_application.read"
+HIRING_APP_CREATE = "hiring_application.create"
+HIRING_APP_UPDATE = "hiring_application.update"
+HIRING_APP_MANAGE = "hiring_application.manage"
+
+# Employee
+EMPLOYEE_READ = "employee.read"
+EMPLOYEE_CREATE = "employee.create"
+EMPLOYEE_UPDATE = "employee.update"
+EMPLOYEE_MANAGE = "employee.manage"
+
+# Site Deployment
+SITE_DEPLOYMENT_READ = "site_deployment.read"
+SITE_DEPLOYMENT_CREATE = "site_deployment.create"
+SITE_DEPLOYMENT_UPDATE = "site_deployment.update"
+SITE_DEPLOYMENT_MANAGE = "site_deployment.manage"
+
+# Deployment (legacy / field tracking alias)
+DEPLOYMENT_READ = "deployment.read"
+DEPLOYMENT_CREATE = "deployment.create"
+DEPLOYMENT_MANAGE = "deployment.manage"
+
+# Report
+REPORT_READ = "report.read"
+REPORT_EXPORT = "report.export"
+
+# Field Tracking
+FIELD_TRACKING_READ = "field_tracking.read"
+
+# ─── All capabilities list ─────────────────────────────────────────────────────
+ALL_CAPABILITIES = [
+    ORGANIZATION_READ, ORGANIZATION_CREATE, ORGANIZATION_UPDATE, ORGANIZATION_DELETE,
+    USER_READ, USER_CREATE, USER_UPDATE, USER_DELETE,
+    ROLE_READ, ROLE_CREATE, ROLE_UPDATE, ROLE_DELETE,
+    MODULE_READ, MODULE_CREATE, MODULE_UPDATE, MODULE_DELETE, MODULE_MANAGE,
+    CLIENT_READ, CLIENT_CREATE, CLIENT_UPDATE, CLIENT_DELETE,
+    SITE_READ, SITE_CREATE, SITE_UPDATE, SITE_DELETE,
+    SITE_ROLE_REQ_READ, SITE_ROLE_REQ_CREATE, SITE_ROLE_REQ_UPDATE, SITE_ROLE_REQ_DELETE,
+    JOB_ROLE_READ, JOB_ROLE_CREATE, JOB_ROLE_UPDATE, JOB_ROLE_DELETE,
+    CAMPAIGN_READ, CAMPAIGN_CREATE, CAMPAIGN_UPDATE, CAMPAIGN_DELETE,
+    SUBMISSION_READ, SUBMISSION_UPDATE, SUBMISSION_DELETE,
+    CANDIDATE_READ, CANDIDATE_CREATE, CANDIDATE_UPDATE, CANDIDATE_SHORTLIST,
+    RESUME_READ, RESUME_VIEW,
+    MRF_READ, MRF_CREATE, MRF_UPDATE, MRF_DELETE, MRF_APPROVE, MRF_REJECT,
+    WORKFLOW_READ, WORKFLOW_CREATE, WORKFLOW_START, WORKFLOW_APPROVE, WORKFLOW_REJECT, WORKFLOW_REASSIGN,
+    WAGE_READ, WAGE_CREATE, WAGE_UPDATE,
+    BUDGET_READ, BUDGET_CREATE,
+    INTERVIEW_READ, INTERVIEW_CREATE, INTERVIEW_MANAGE,
+    OFFER_READ, OFFER_CREATE, OFFER_APPROVE,
+    HIRING_APP_READ, HIRING_APP_CREATE, HIRING_APP_UPDATE, HIRING_APP_MANAGE,
+    EMPLOYEE_READ, EMPLOYEE_CREATE, EMPLOYEE_UPDATE, EMPLOYEE_MANAGE,
+    SITE_DEPLOYMENT_READ, SITE_DEPLOYMENT_CREATE, SITE_DEPLOYMENT_UPDATE, SITE_DEPLOYMENT_MANAGE,
+    DEPLOYMENT_READ, DEPLOYMENT_CREATE, DEPLOYMENT_MANAGE,
+    REPORT_READ, REPORT_EXPORT,
+    FIELD_TRACKING_READ,
+]
+
+# ─── Role → capabilities mapping ──────────────────────────────────────────────
+ROLE_CAPABILITIES = {
+    # Full system admin (Logicon internal — replaces tenant_admin/org_admin)
+    'admin': ALL_CAPABILITIES,
+
+    # HR Admin — hiring lifecycle, MRF, workflow, candidate management
+    'hr_admin': [
+        USER_READ,
+        ROLE_READ,
+        CLIENT_READ,
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        CAMPAIGN_READ, CAMPAIGN_CREATE, CAMPAIGN_UPDATE, CAMPAIGN_DELETE,
+        SUBMISSION_READ, SUBMISSION_UPDATE,
+        CANDIDATE_READ, CANDIDATE_CREATE, CANDIDATE_UPDATE, CANDIDATE_SHORTLIST,
+        RESUME_READ, RESUME_VIEW,
+        MRF_READ, MRF_CREATE, MRF_UPDATE, MRF_DELETE, MRF_APPROVE, MRF_REJECT,
+        WORKFLOW_READ, WORKFLOW_START, WORKFLOW_APPROVE, WORKFLOW_REJECT, WORKFLOW_REASSIGN,
+        WAGE_READ,
+        BUDGET_READ,
+        INTERVIEW_READ, INTERVIEW_CREATE, INTERVIEW_MANAGE,
+        OFFER_READ, OFFER_CREATE, OFFER_APPROVE,
+        HIRING_APP_READ, HIRING_APP_CREATE, HIRING_APP_UPDATE, HIRING_APP_MANAGE,
+        EMPLOYEE_READ, EMPLOYEE_CREATE, EMPLOYEE_UPDATE, EMPLOYEE_MANAGE,
+        SITE_DEPLOYMENT_READ, SITE_DEPLOYMENT_CREATE, SITE_DEPLOYMENT_UPDATE, SITE_DEPLOYMENT_MANAGE,
+        DEPLOYMENT_READ, DEPLOYMENT_CREATE,
+        REPORT_READ, REPORT_EXPORT,
+    ],
+
+    # HR Executive — day-to-day hiring ops
+    'hr_executive': [
+        CLIENT_READ,
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        CAMPAIGN_READ, CAMPAIGN_CREATE, CAMPAIGN_UPDATE,
+        SUBMISSION_READ, SUBMISSION_UPDATE,
+        CANDIDATE_READ, CANDIDATE_CREATE, CANDIDATE_UPDATE, CANDIDATE_SHORTLIST,
+        RESUME_READ, RESUME_VIEW,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ, WORKFLOW_START,
+        WAGE_READ,
+        INTERVIEW_READ, INTERVIEW_CREATE,
+        OFFER_READ, OFFER_CREATE,
+        HIRING_APP_READ, HIRING_APP_CREATE, HIRING_APP_UPDATE,
+        EMPLOYEE_READ,
+        SITE_DEPLOYMENT_READ,
+        DEPLOYMENT_READ,
+        REPORT_READ,
+    ],
+
+    # Finance — wage/budget review, financial MRF approval step
+    'finance': [
+        CLIENT_READ,
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        MRF_READ, MRF_APPROVE, MRF_REJECT,
+        WORKFLOW_READ, WORKFLOW_APPROVE, WORKFLOW_REJECT,
+        WAGE_READ, WAGE_CREATE, WAGE_UPDATE,
+        BUDGET_READ, BUDGET_CREATE,
+        REPORT_READ, REPORT_EXPORT,
+    ],
+
+    # HoD — department-level approval in workflow
+    'hod': [
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        SUBMISSION_READ,
+        CANDIDATE_READ, CANDIDATE_SHORTLIST,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ, WORKFLOW_START, WORKFLOW_APPROVE,
+        INTERVIEW_READ, INTERVIEW_CREATE,
+        OFFER_READ, OFFER_APPROVE,
+        HIRING_APP_READ,
+        EMPLOYEE_READ,
+        SITE_DEPLOYMENT_READ,
+        DEPLOYMENT_READ,
+        REPORT_READ,
+    ],
+
+    # Sales Manager — client/site management, MRF visibility, reporting
+    'sales_manager': [
+        CLIENT_READ, CLIENT_CREATE, CLIENT_UPDATE,
+        SITE_READ, SITE_CREATE, SITE_UPDATE,
+        SITE_ROLE_REQ_READ, SITE_ROLE_REQ_CREATE, SITE_ROLE_REQ_UPDATE,
+        JOB_ROLE_READ,
+        CAMPAIGN_READ, CAMPAIGN_CREATE,
+        SUBMISSION_READ,
+        CANDIDATE_READ,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ,
+        WAGE_READ,
+        BUDGET_READ,
+        REPORT_READ, REPORT_EXPORT,
+    ],
+
+    # Sales Executive — creates clients/sites/campaigns, raises MRF
+    'sales_executive': [
+        CLIENT_READ, CLIENT_CREATE, CLIENT_UPDATE,
+        SITE_READ, SITE_CREATE, SITE_UPDATE,
+        SITE_ROLE_REQ_READ, SITE_ROLE_REQ_CREATE,
+        JOB_ROLE_READ,
+        CAMPAIGN_READ, CAMPAIGN_CREATE,
+        SUBMISSION_READ,
+        CANDIDATE_READ,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ,
+        WAGE_READ,
+        REPORT_READ,
+    ],
+
+    # Site Manager — site-level operations and field deployment
+    'site_manager': [
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        CAMPAIGN_READ,
+        SUBMISSION_READ,
+        CANDIDATE_READ, CANDIDATE_SHORTLIST,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ, WORKFLOW_START,
+        INTERVIEW_READ, INTERVIEW_CREATE,
+        OFFER_READ,
+        HIRING_APP_READ, HIRING_APP_UPDATE,
+        EMPLOYEE_READ,
+        SITE_DEPLOYMENT_READ, SITE_DEPLOYMENT_CREATE, SITE_DEPLOYMENT_UPDATE,
+        DEPLOYMENT_READ, DEPLOYMENT_CREATE,
+        FIELD_TRACKING_READ,
+        REPORT_READ,
+    ],
+
+    # Field Supervisor — attendance and deployment tracking
+    'field_supervisor': [
+        SITE_READ,
+        SUBMISSION_READ,
+        CANDIDATE_READ,
+        EMPLOYEE_READ,
+        SITE_DEPLOYMENT_READ,
+        DEPLOYMENT_READ, DEPLOYMENT_CREATE,
+        FIELD_TRACKING_READ,
+    ],
+
+    # Client Admin — scoped to client node, can see all child sites and raise MRFs
+    'client_admin': [
+        CLIENT_READ,
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        CANDIDATE_READ,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ, WORKFLOW_START,
+        INTERVIEW_READ,
+        HIRING_APP_READ,
+        SITE_DEPLOYMENT_READ,
+        DEPLOYMENT_READ,
+        REPORT_READ,
+    ],
+
+    # Client Site User — scoped to one site node
+    'client_site_user': [
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        CANDIDATE_READ,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ, WORKFLOW_START,
+        INTERVIEW_READ,
+        HIRING_APP_READ,
+        SITE_DEPLOYMENT_READ,
+        DEPLOYMENT_READ,
+        REPORT_READ,
+    ],
+
+    # Site Supervisor — site-level requester/approver from client side
+    'site_supervisor': [
+        SITE_READ, SITE_ROLE_REQ_READ,
+        JOB_ROLE_READ,
+        MRF_READ, MRF_CREATE,
+        WORKFLOW_READ, WORKFLOW_START,
+        DEPLOYMENT_READ,
+        FIELD_TRACKING_READ,
+        REPORT_READ,
+    ],
+
+    # Legacy generic client role; keep for backward-compatible assignments.
+    'client_user': [
+        SITE_READ,
+        SUBMISSION_READ,
+        CANDIDATE_READ,
+        MRF_READ,
+        DEPLOYMENT_READ,
+        REPORT_READ,
+    ],
+}
+
+
+def get_capabilities_for_role(role_code: str) -> list:
+    """Return list of capability strings for a given role code."""
+    return ROLE_CAPABILITIES.get(role_code, [])
+
+
+def get_user_capabilities(user) -> list:
+    """
+    Union of all capabilities for all roles assigned to the user.
+    Looks up UserRoleAssignment for the user, collects role codes, unions capabilities.
+    """
+    if user.is_superuser:
+        return sorted(ALL_CAPABILITIES)
+
+    from apps.access.models import UserRoleAssignment
+
+    role_codes = (
+        UserRoleAssignment.objects
+        .filter(user=user)
+        .values_list('role__code', flat=True)
+        .distinct()
+    )
+
+    capabilities = set()
+    for code in role_codes:
+        capabilities.update(get_capabilities_for_role(code))
+
+    return sorted(capabilities)
