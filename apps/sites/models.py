@@ -80,6 +80,14 @@ class SiteProfile(TimeStampedModel):
     )
     name = models.CharField(max_length=255)
     code = models.CharField(max_length=64)
+    location_area = models.ForeignKey(
+        'wages.LocationArea',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sites',
+        help_text='Structured location master. Takes precedence over state/city in wage lookup.',
+    )
     address = models.TextField(blank=True)
     city = models.CharField(max_length=128, blank=True)
     state = models.CharField(max_length=128, blank=True)
@@ -168,6 +176,23 @@ class SiteRoleRequirement(TimeStampedModel):
     effective_from = models.DateField()
     effective_to = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
+
+    # Wage master link — set automatically by wage lookup on create/update
+    wage_rate = models.ForeignKey(
+        'wages.MinimumWageRate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='site_requirements',
+        help_text='MinimumWageRate matched by wage lookup at the time of create/update.',
+    )
+    wage_rate_monthly_snapshot = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+    )
+    wage_rate_daily_snapshot = models.DecimalField(
+        max_digits=8, decimal_places=2, null=True, blank=True,
+    )
+    wage_rate_effective_from_snapshot = models.DateField(null=True, blank=True)
+    wage_rate_source_snapshot = models.CharField(max_length=255, blank=True)
 
     class Meta:
         verbose_name = 'Site Role Requirement'

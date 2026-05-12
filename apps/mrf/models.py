@@ -65,6 +65,22 @@ class ManpowerRequest(TimeStampedModel):
     )
     mrf_type = models.CharField(max_length=32, choices=MRF_TYPE_CHOICES)
     status = models.CharField(max_length=32, choices=MRF_STATUS_CHOICES, default='draft')
+    requesting_department = models.ForeignKey(
+        'core.Department',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requested_mrfs',
+        help_text='Department/team raising the manpower request.',
+    )
+    required_department = models.ForeignKey(
+        'core.Department',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='required_mrfs',
+        help_text='Department/service where manpower is needed.',
+    )
     department = models.CharField(max_length=128, blank=True)
     billing_type = models.CharField(max_length=16, choices=BILLING_TYPE_CHOICES)
     required_by_date = models.DateField(null=True, blank=True)

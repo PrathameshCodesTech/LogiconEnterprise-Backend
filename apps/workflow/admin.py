@@ -1,58 +1,122 @@
 from django.contrib import admin
-from .models import WorkflowTemplate, WorkflowStepTemplate, WorkflowInstance, WorkflowAction
+
+from .models import (
+    WorkflowTemplate, WorkflowStepTemplate,
+    WorkflowTemplateMapping, StepAssignmentConfig,
+    WorkflowInstance, WorkflowStepInstance, WorkflowAction,
+)
 
 
 class WorkflowStepTemplateInline(admin.TabularInline):
     model = WorkflowStepTemplate
     extra = 0
     fields = [
-        'step_key', 'step_order', 'name', 'approver_role',
-        'is_client_step', 'can_request_changes', 'sla_hours',
+        'order', 'code', 'name', 'assignment_mode', 'actor_type',
+        'on_approve_next', 'on_reject_target', 'on_request_changes_target',
+        'requires_comment_on_reject', 'requires_comment_on_request_changes', 'sla_hours',
     ]
-    raw_id_fields = ['approver_role', 'approver_scope_node',
-                     'on_approve_next_step', 'on_reject_target_step']
 
 
 @admin.register(WorkflowTemplate)
 class WorkflowTemplateAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'org', 'module', 'is_active', 'created_at']
-    search_fields = ['name', 'code', 'module']
-    list_filter = ['module', 'is_active', 'org']
+    list_display = ['name', 'code', 'org', 'trigger_type', 'version', 'is_active', 'created_at']
+    search_fields = ['name', 'code']
+    list_filter = ['trigger_type', 'is_active', 'org']
     readonly_fields = ['created_at', 'updated_at']
-    raw_id_fields = ['org', 'scope_node']
+    raw_id_fields = ['org']
     inlines = [WorkflowStepTemplateInline]
 
 
 @admin.register(WorkflowStepTemplate)
 class WorkflowStepTemplateAdmin(admin.ModelAdmin):
+    list_display = ['template', 'order', 'code', 'name', 'assignment_mode', 'actor_type', 'sla_hours']
+    search_fields = ['code', 'name', 'template__name']
+    list_filter = ['assignment_mode', 'actor_type']
+    raw_id_fields = ['template']
+
+
+@admin.register(WorkflowTemplateMapping)
+class WorkflowTemplateMappingAdmin(admin.ModelAdmin):
+    list_display = ['org', 'trigger_type', 'template', 'client', 'site', 'is_active', 'created_at']
+    search_fields = ['template__name', 'template__code']
+    list_filter = ['trigger_type', 'is_active', 'org']
+    readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['org', 'template', 'client', 'site']
+
+
+@admin.register(StepAssignmentConfig)
+class StepAssignmentConfigAdmin(admin.ModelAdmin):
     list_display = [
-        'template', 'step_order', 'step_key', 'name',
-        'approver_role', 'is_client_step', 'can_request_changes', 'sla_hours',
+        'org', 'trigger_type', 'step_code', 'department', 'client', 'site',
+        'assignment_mode', 'named_user', 'is_active', 'effective_from', 'effective_to',
     ]
-    search_fields = ['name', 'step_key', 'template__name']
-    list_filter = ['is_client_step', 'can_request_changes']
-    raw_id_fields = [
-        'template', 'approver_role', 'approver_scope_node',
-        'on_approve_next_step', 'on_reject_target_step',
+    search_fields = ['step_code', 'named_user__username', 'department__name', 'department__code']
+    list_filter = ['trigger_type', 'assignment_mode', 'is_active', 'org', 'department', 'client', 'site']
+    readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['org', 'client', 'site', 'named_user', 'eligible_role', 'eligible_scope', 'department']
+
+
+class WorkflowStepInstanceInline(admin.TabularInline):
+    model = WorkflowStepInstance
+    extra = 0
+    fields = [
+        'step_order', 'step_code', 'step_name', 'status',
+        'assigned_user', 'assigned_department_name_snapshot', 'acted_by', 'acted_at', 'action_taken',
     ]
+    readonly_fields = fields
+    can_delete = False
+    show_change_link = True
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class WorkflowActionInline(admin.TabularInline):
+    model = WorkflowAction
+    extra = 0
+    fields = ['step_instance', 'actor', 'action', 'comment', 'reassign_from', 'reassign_to', 'created_at']
+    readonly_fields = fields
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WorkflowInstance)
 class WorkflowInstanceAdmin(admin.ModelAdmin):
+    list_display = ['id', 'mrf', 'template', 'status', 'initiated_by', 'created_at', 'completed_at']
+    search_fields = ['mrf__id', 'template__name']
+    list_filter = ['status', 'org', 'template']
+    readonly_fields = ['created_at', 'updated_at', 'completed_at']
+    raw_id_fields = ['org', 'mrf', 'template', 'initiated_by']
+    inlines = [WorkflowStepInstanceInline, WorkflowActionInline]
+
+
+@admin.register(WorkflowStepInstance)
+class WorkflowStepInstanceAdmin(admin.ModelAdmin):
     list_display = [
-        'id', 'template', 'object_type', 'object_id',
-        'current_step', 'status', 'started_by', 'created_at',
+        'id', 'workflow', 'step_order', 'step_code', 'step_name',
+        'assigned_user', 'status', 'acted_by', 'acted_at',
     ]
-    search_fields = ['object_type', 'object_id', 'template__name']
-    list_filter = ['status', 'template']
-    readonly_fields = ['created_at', 'updated_at']
-    raw_id_fields = ['template', 'current_step', 'started_by']
+    search_fields = ['step_code', 'step_name', 'workflow__id']
+    list_filter = ['status', 'assignment_mode']
+    raw_id_fields = ['workflow', 'step_template', 'assigned_user', 'acted_by']
+    readonly_fields = ['activated_at', 'due_at']
 
 
 @admin.register(WorkflowAction)
 class WorkflowActionAdmin(admin.ModelAdmin):
-    list_display = ['instance', 'step', 'step_snapshot_name', 'action', 'action_by', 'created_at']
-    search_fields = ['step_snapshot_name', 'note', 'action_by__username']
+    list_display = ['id', 'workflow', 'step_instance', 'actor', 'action', 'created_at']
+    search_fields = ['actor__username', 'comment']
     list_filter = ['action']
-    readonly_fields = ['created_at']
-    raw_id_fields = ['instance', 'step', 'action_by']
+    readonly_fields = ['workflow', 'step_instance', 'actor', 'action', 'comment',
+                       'reassign_from', 'reassign_to', 'created_at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

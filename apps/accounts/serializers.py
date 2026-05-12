@@ -6,16 +6,21 @@ User serializers for list, create, and update operations.
 
 from rest_framework import serializers
 
+from apps.core.models import Department
 from .models import User
 
 
 class UserListSerializer(serializers.ModelSerializer):
+    department_name = serializers.CharField(source='department.name', read_only=True, default=None)
+    department_code = serializers.CharField(source='department.code', read_only=True, default=None)
+
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'phone_number', 'phone_normalized', 'employee_code',
-            'user_type', 'org', 'is_active', 'is_invited',
+            'user_type', 'org', 'department', 'department_name', 'department_code',
+            'is_active', 'is_invited',
             'last_invited_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
@@ -27,13 +32,18 @@ class UserCreateSerializer(serializers.ModelSerializer):
         style={'input_type': 'password'},
     )
     employee_code = serializers.CharField(required=False, allow_blank=True)
+    department = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.all(),
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model = User
         fields = [
             'username', 'email', 'first_name', 'last_name',
             'phone_number', 'employee_code', 'user_type',
-            'org', 'is_active', 'is_invited', 'password',
+            'org', 'department', 'is_active', 'is_invited', 'password',
         ]
         validators = []
 
@@ -57,12 +67,18 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
+    department = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = User
         fields = [
             'email', 'first_name', 'last_name',
             'phone_number', 'employee_code', 'user_type',
-            'is_active', 'is_invited',
+            'department', 'is_active', 'is_invited',
         ]
         validators = []
 

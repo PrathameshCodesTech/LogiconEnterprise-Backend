@@ -42,6 +42,13 @@ class User(AbstractUser):
         blank=True,
         related_name='users',
     )
+    department = models.ForeignKey(
+        'core.Department',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='users',
+    )
     phone_number = models.CharField(max_length=20, blank=True)
     phone_normalized = models.CharField(max_length=15, blank=True, db_index=True)
     employee_code = models.CharField(max_length=50, blank=True, db_index=True)

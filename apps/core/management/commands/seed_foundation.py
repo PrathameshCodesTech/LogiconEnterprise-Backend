@@ -22,10 +22,13 @@ class Command(BaseCommand):
         self._seed_role_permissions(roles, permissions)
         self._seed_job_roles(org)
         self._seed_wage_categories()
+        location_areas = self._seed_location_areas()
+        self._seed_minimum_wage_rates(org, location_areas)
         client = self._seed_client(org, scope_nodes)
-        site = self._seed_site_profile(org, client, scope_nodes)
+        site = self._seed_site_profile(org, client, scope_nodes, location_areas)
         self._seed_site_role_requirements(site)
         self._seed_module_activations(scope_nodes)
+        self._seed_departments(org)
 
         self.stdout.write(self.style.SUCCESS('\n[OK] Foundation seed complete.\n'))
 
@@ -231,6 +234,93 @@ class Command(BaseCommand):
             self.stdout.write(f'  [WageCategory] {name} — {"CREATED" if created else "EXISTS"}')
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _seed_location_areas(self):
+        from apps.wages.models import LocationArea
+
+        areas = {}
+
+        def make_area(code, name, area_type, parent, state_name=''):
+            obj, created = LocationArea.objects.get_or_create(
+                parent=parent,
+                code=code,
+                defaults={
+                    'name': name,
+                    'area_type': area_type,
+                    'state_name': state_name,
+                    'is_active': True,
+                },
+            )
+            self.stdout.write(f'  [LocationArea] {name} ({area_type}) — {"CREATED" if created else "EXISTS"}')
+            return obj
+
+        areas['maharashtra'] = make_area('maharashtra', 'Maharashtra', 'state', None, 'Maharashtra')
+        areas['west_region'] = make_area('west-region', 'West Region', 'region', areas['maharashtra'], 'Maharashtra')
+        areas['mumbai'] = make_area('mumbai', 'Mumbai', 'city', areas['west_region'], 'Maharashtra')
+        areas['pune'] = make_area('pune', 'Pune', 'city', areas['west_region'], 'Maharashtra')
+        return areas
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _seed_minimum_wage_rates(self, org, location_areas):
+        from apps.jobs.models import JobRole
+        from apps.wages.models import WageCategory, MinimumWageRate
+
+        effective_from = datetime.date(2025, 1, 1)
+        mumbai = location_areas['mumbai']
+
+        rate_defs = [
+            {
+                'job_role_code': 'housekeeping',
+                'wage_category_code': 'unskilled',
+                'monthly_wage': 10000,
+                'daily_wage': 385,
+                'source_note': 'Maharashtra MW Jan 2025 — Housekeeping',
+            },
+            {
+                'job_role_code': 'security_guard',
+                'wage_category_code': 'unskilled',
+                'monthly_wage': 12000,
+                'daily_wage': 462,
+                'source_note': 'Maharashtra MW Jan 2025 — Security Guard',
+            },
+            {
+                'job_role_code': 'electrician',
+                'wage_category_code': 'skilled',
+                'monthly_wage': 18000,
+                'daily_wage': 692,
+                'source_note': 'Maharashtra MW Jan 2025 — Electrician',
+            },
+        ]
+
+        for defn in rate_defs:
+            try:
+                job_role = JobRole.objects.get(org=org, code=defn['job_role_code'])
+                wage_cat = WageCategory.objects.get(code=defn['wage_category_code'])
+            except (JobRole.DoesNotExist, WageCategory.DoesNotExist):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f'  [MinimumWageRate] Skipped {defn["job_role_code"]} — role/category not found'
+                    )
+                )
+                continue
+
+            obj, created = MinimumWageRate.objects.get_or_create(
+                org=org,
+                location=mumbai,
+                wage_category=wage_cat,
+                role=job_role,
+                effective_from=effective_from,
+                defaults={
+                    'monthly_wage': defn['monthly_wage'],
+                    'daily_wage': defn['daily_wage'],
+                    'source_note': defn['source_note'],
+                    'is_active': True,
+                },
+            )
+            self.stdout.write(
+                f'  [MinimumWageRate] {job_role.name} @ Mumbai — {"CREATED" if created else "EXISTS"}'
+            )
+
+    # ──────────────────────────────────────────────────────────────────────────
     def _seed_client(self, org, scope_nodes):
         from apps.core.models import ScopeNode
         from apps.sites.models import Client
@@ -271,7 +361,7 @@ class Command(BaseCommand):
         return client
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _seed_site_profile(self, org, client, scope_nodes):
+    def _seed_site_profile(self, org, client, scope_nodes, location_areas):
         from apps.core.models import ScopeNode
         from apps.sites.models import SiteProfile
 
@@ -292,12 +382,14 @@ class Command(BaseCommand):
             f'  [ScopeNode] {site_scope.path} (site) — {"CREATED" if scope_created else "EXISTS"}'
         )
 
+        mumbai_loc = location_areas.get('mumbai')
         site, created = SiteProfile.objects.get_or_create(
             org=org,
             code='demo-mumbai',
             defaults={
                 'client': client,
                 'scope_node': site_scope,
+                'location_area': mumbai_loc,
                 'name': 'Demo Site Mumbai',
                 'city': 'Mumbai',
                 'state': 'Maharashtra',
@@ -312,6 +404,9 @@ class Command(BaseCommand):
         if site.client_id != client.id:
             site.client = client
             changed_fields.append('client')
+        if mumbai_loc and site.location_area_id != mumbai_loc.id:
+            site.location_area = mumbai_loc
+            changed_fields.append('location_area')
         if changed_fields:
             changed_fields.append('updated_at')
             site.save(update_fields=changed_fields)
@@ -419,3 +514,27 @@ class Command(BaseCommand):
             f'  [ModuleActivation] Created: {created_count}, Existed: {existed_count} '
             f'(all modules @ company scope)'
         )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _seed_departments(self, org):
+        from apps.core.models import Department
+
+        dept_defs = [
+            ('HR', 'hr', 'Human Resources — recruitment, onboarding, payroll'),
+            ('Finance', 'finance', 'Finance and accounts'),
+            ('Sales', 'sales', 'Sales and client acquisition'),
+            ('Operations', 'operations', 'Operations and service delivery'),
+            ('Admin', 'admin', 'Administration and compliance'),
+            ('Support', 'support', 'IT and general support'),
+        ]
+
+        for name, code, description in dept_defs:
+            obj, created = Department.objects.get_or_create(
+                org=org,
+                code=code,
+                client=None,
+                site=None,
+                is_active=True,
+                defaults={'name': name, 'description': description},
+            )
+            self.stdout.write(f'  [Department] {name} — {"CREATED" if created else "EXISTS"}')

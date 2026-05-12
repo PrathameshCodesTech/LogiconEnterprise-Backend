@@ -19,13 +19,20 @@ class MRFLineItemInline(admin.TabularInline):
 class ManpowerRequestAdmin(admin.ModelAdmin):
     list_display = [
         'id', 'org', 'site', 'mrf_type', 'status', 'billing_type',
+        'requesting_department', 'required_department',
         'requested_by_type', 'required_by_date', 'client_visible',
         'requested_by', 'created_at',
     ]
-    search_fields = ['org__name', 'site__name', 'department']
-    list_filter = ['mrf_type', 'status', 'billing_type', 'requested_by_type', 'client_visible', 'org']
+    search_fields = [
+        'org__name', 'site__name', 'department',
+        'requesting_department__name', 'required_department__name',
+    ]
+    list_filter = [
+        'mrf_type', 'status', 'billing_type', 'requested_by_type', 'client_visible',
+        'org', 'requesting_department', 'required_department',
+    ]
     readonly_fields = ['created_at', 'updated_at', 'submitted_at', 'approved_at', 'rejected_at']
-    raw_id_fields = ['org', 'site', 'requested_by']
+    raw_id_fields = ['org', 'site', 'requested_by', 'requesting_department', 'required_department']
     inlines = [MRFLineItemInline]
 
 

@@ -30,6 +30,7 @@ urlpatterns = [
     path('api/public/', include('apps.intake.public_urls')),
     path('api/talent/', include('apps.talent.urls')),
     path('api/mrf/', include('apps.mrf.urls')),
+    path('api/onboarding/', include('apps.onboarding.urls')),
     path('api/workflow/', include('apps.workflow.urls')),
     path('api/audit/', include('apps.audit.urls')),
     path('api/access/', include('apps.access.urls')),

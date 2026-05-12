@@ -8,3 +8,4 @@ class JobRoleAdmin(admin.ModelAdmin):
     search_fields = ['name', 'code', 'description']
     list_filter = ['skill_category', 'is_active', 'org']
     readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['org']

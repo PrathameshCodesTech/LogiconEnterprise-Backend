@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
-from apps.core.models import Organization, ScopeNode
+from apps.core.models import Department, Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
 from apps.sites.models import Client, SiteProfile, SiteRoleRequirement
@@ -126,6 +126,16 @@ class MRFTestBase(TestCase):
         cls.no_mrf_user = _user('mrf_field_sup', cls.org, cls.r_field_sup, cls.n_co)
         cls.superuser = _user('mrf_super', cls.org, None, None, is_superuser=True)
 
+        cls.dept_operations = Department.objects.create(
+            org=cls.org, name='Operations', code='operations',
+        )
+        cls.dept_housekeeping = Department.objects.create(
+            org=cls.org, client=cls.client_obj, site=cls.site,
+            name='Housekeeping', code='housekeeping',
+        )
+        cls.hr_admin.department = cls.dept_operations
+        cls.hr_admin.save(update_fields=['department'])
+
         cls.job_role = JobRole.objects.create(
             org=cls.org, name='Security Guard MRF', code='guard-mrf',
             skill_category='unskilled',
@@ -171,7 +181,10 @@ class TestManpowerRequestAPI(MRFTestBase):
         resp = self.api.get(f'/api/mrf/requests/{self.mrf.pk}/')
         for field in [
             'id', 'org', 'site', 'requested_by', 'requested_by_type',
-            'mrf_type', 'status', 'department', 'billing_type',
+            'mrf_type', 'status',
+            'requesting_department', 'requesting_department_name', 'requesting_department_code',
+            'required_department', 'required_department_name', 'required_department_code',
+            'department', 'billing_type',
             'required_by_date', 'reason', 'client_visible',
             'submitted_at', 'approved_at', 'rejected_at',
             'line_items', 'created_at', 'updated_at',
@@ -201,6 +214,97 @@ class TestManpowerRequestAPI(MRFTestBase):
         self.assertEqual(resp.data['mrf_type'], 'new_hiring')
         self.assertEqual(resp.data['status'], 'draft')
         self.assertIn('requested_by', resp.data)
+
+    def test_create_mrf_with_structured_departments_201(self):
+        self._login(self.hr_admin)
+        payload = {
+            'site': self.site.pk,
+            'requested_by_type': 'internal',
+            'mrf_type': 'new_hiring',
+            'billing_type': 'billable',
+            'requesting_department': self.dept_operations.pk,
+            'required_department': self.dept_housekeeping.pk,
+            'department': 'Legacy display text',
+            'reason': 'Housekeeping manpower request',
+            'status': 'draft',
+        }
+        resp = self.api.post('/api/mrf/requests/', payload, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['requesting_department'], self.dept_operations.pk)
+        self.assertEqual(resp.data['requesting_department_name'], 'Operations')
+        self.assertEqual(resp.data['requesting_department_code'], 'operations')
+        self.assertEqual(resp.data['required_department'], self.dept_housekeeping.pk)
+        self.assertEqual(resp.data['required_department_name'], 'Housekeeping')
+        self.assertEqual(resp.data['required_department_code'], 'housekeeping')
+
+    def test_create_defaults_requesting_department_from_actor(self):
+        self._login(self.hr_admin)
+        payload = {
+            'site': self.site.pk,
+            'mrf_type': 'new_hiring',
+            'billing_type': 'billable',
+            'required_department': self.dept_housekeeping.pk,
+            'status': 'draft',
+        }
+        resp = self.api.post('/api/mrf/requests/', payload, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['requesting_department'], self.dept_operations.pk)
+
+    def test_create_defaults_requesting_department_from_actor_when_null(self):
+        self._login(self.hr_admin)
+        payload = {
+            'site': self.site.pk,
+            'mrf_type': 'new_hiring',
+            'billing_type': 'billable',
+            'requesting_department': None,
+            'required_department': self.dept_housekeeping.pk,
+            'status': 'draft',
+        }
+        resp = self.api.post('/api/mrf/requests/', payload, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['requesting_department'], self.dept_operations.pk)
+
+    def test_create_rejects_department_from_other_org(self):
+        other_org = _org(code='mrf-dept-other')
+        other_dept = Department.objects.create(
+            org=other_org, name='Other Operations', code='other-ops',
+        )
+        self._login(self.hr_admin)
+        payload = {
+            'site': self.site.pk,
+            'mrf_type': 'new_hiring',
+            'billing_type': 'billable',
+            'requesting_department': other_dept.pk,
+            'status': 'draft',
+        }
+        resp = self.api.post('/api/mrf/requests/', payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('requesting_department', resp.data)
+
+    def test_create_rejects_required_department_from_other_site(self):
+        other_client = Client.objects.create(
+            org=self.org, name='Other Client', code='other-client-mrf',
+            scope_node=self.n_co, is_active=True,
+        )
+        other_site = SiteProfile.objects.create(
+            org=self.org, client=other_client, scope_node=self.n_cl,
+            name='Other Site', code='other-site-mrf', city='Pune', state='MH', is_active=True,
+        )
+        other_dept = Department.objects.create(
+            org=self.org, client=other_client, site=other_site,
+            name='Other Housekeeping', code='other-housekeeping',
+        )
+        self._login(self.hr_admin)
+        payload = {
+            'site': self.site.pk,
+            'mrf_type': 'new_hiring',
+            'billing_type': 'billable',
+            'required_department': other_dept.pk,
+            'status': 'draft',
+        }
+        resp = self.api.post('/api/mrf/requests/', payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('required_department', resp.data)
 
     def test_create_injects_org_from_site(self):
         self._login(self.hr_admin)

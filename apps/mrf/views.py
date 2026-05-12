@@ -39,8 +39,12 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
     """
     queryset = ManpowerRequest.objects.select_related(
         'org', 'site', 'requested_by',
+        'requesting_department', 'required_department',
         'site__scope_node', 'site__client__scope_node',
-    ).prefetch_related('line_items__job_role').order_by('-created_at')
+    ).prefetch_related(
+        'line_items__job_role',
+        'workflow_instances__steps__assigned_user',
+    ).order_by('-created_at')
 
     permission_classes = [IsAuthenticated, HasCapability]
     scope_filter = filter_mrfs_for_user
@@ -48,8 +52,13 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
     filterset_fields = [
         'org', 'site', 'mrf_type', 'status', 'billing_type',
         'requested_by', 'requested_by_type', 'client_visible',
+        'requesting_department', 'required_department',
     ]
-    search_fields = ['department', 'reason']
+    search_fields = [
+        'department', 'reason',
+        'requesting_department__name', 'requesting_department__code',
+        'required_department__name', 'required_department__code',
+    ]
 
     action_required_capabilities = {
         'list':           'mrf.read',
@@ -78,7 +87,10 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
     def perform_create(self, serializer):
         site = serializer.validated_data['site']
         self._check_site_scope(site)
-        serializer.save(org=site.org, requested_by=self.request.user)
+        extra = {}
+        if serializer.validated_data.get('requesting_department') is None:
+            extra['requesting_department'] = getattr(self.request.user, 'department', None)
+        serializer.save(org=site.org, requested_by=self.request.user, **extra)
 
     def perform_update(self, serializer):
         site = serializer.validated_data.get('site', serializer.instance.site)

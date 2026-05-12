@@ -93,6 +93,19 @@ def filter_site_role_requirements_for_user(queryset, user):
     return queryset.filter(site_q | client_q).distinct()
 
 
+def filter_onboarding_requests_for_user(queryset, user):
+    """
+    Filter ClientOnboardingRequest queryset via client.scope_node path.
+    Internal onboarding requests are org/client scoped — no site level.
+    """
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    return queryset.filter(_scope_q('client__scope_node__path', paths)).distinct()
+
+
 def filter_mrfs_for_user(queryset, user):
     """
     Filter ManpowerRequest queryset via site.scope_node path.

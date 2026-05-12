@@ -48,9 +48,11 @@ PERMISSION_RESOURCE_CHOICES = [
     ('hiring_application', 'Hiring Application'),
     ('employee', 'Employee'),
     ('site_deployment', 'Site Deployment'),
+    ('department', 'Department'),
     ('deployment', 'Deployment'),
     ('report', 'Report'),
     ('field_tracking', 'Field Tracking'),
+    ('client_onboarding', 'Client Onboarding'),
 ]
 
 

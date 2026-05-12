@@ -58,6 +58,26 @@ def create_client_with_scope(
     return client
 
 
+def apply_location_snapshots(site: SiteProfile) -> bool:
+    """
+    Auto-fill site.city / site.state from location_area when the text fields are blank.
+
+    Does NOT save — caller must call site.save(update_fields=[...]) if this returns True.
+    """
+    loc = getattr(site, 'location_area', None)
+    if loc is None:
+        return False
+
+    changed = False
+    if not site.city and loc.area_type == 'city':
+        site.city = loc.name
+        changed = True
+    if not site.state and loc.state_name:
+        site.state = loc.state_name
+        changed = True
+    return changed
+
+
 def create_site_with_scope(
     org,
     client: Client,

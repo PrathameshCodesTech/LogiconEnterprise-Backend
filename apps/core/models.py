@@ -6,6 +6,7 @@ Foundation models:
   - SoftDeleteModel (abstract)
   - Organization
   - ScopeNode
+  - Department
 """
 
 from django.db import models
@@ -114,3 +115,101 @@ class ScopeNode(TimeStampedModel):
             return []
         parts = self.path.split('/')
         return ['/'.join(parts[:idx]) for idx in range(1, len(parts))]
+
+
+class Department(TimeStampedModel):
+    """
+    Business/team grouping for users and workflow routing.
+
+    Three scopes (most specific wins):
+      org-level   — client null, site null   (e.g. HR, Finance, Sales)
+      client-level — client set, site null   (e.g. Client Operations @ ABC Infra)
+      site-level  — site set                 (e.g. Site Operations @ ABC Site 1)
+
+    When site is set, client is auto-normalised to site.client on save.
+    Uniqueness is enforced only among active rows (inactive rows do not block replacements).
+    """
+    org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='departments',
+    )
+    client = models.ForeignKey(
+        'sites.Client', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='departments',
+    )
+    site = models.ForeignKey(
+        'sites.SiteProfile', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='departments',
+    )
+    name = models.CharField(max_length=128)
+    code = models.CharField(max_length=64)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = 'Department'
+        verbose_name_plural = 'Departments'
+        ordering = ['org', 'name']
+        constraints = [
+            # org-level: unique active code with no client/site
+            models.UniqueConstraint(
+                fields=['org', 'code'],
+                condition=models.Q(client__isnull=True, site__isnull=True, is_active=True),
+                name='unique_dept_org_code',
+            ),
+            # client-level: unique active code per client (no site)
+            models.UniqueConstraint(
+                fields=['org', 'client', 'code'],
+                condition=models.Q(client__isnull=False, site__isnull=True, is_active=True),
+                name='unique_dept_client_code',
+            ),
+            # site-level: unique active code per site
+            models.UniqueConstraint(
+                fields=['org', 'site', 'code'],
+                condition=models.Q(site__isnull=False, is_active=True),
+                name='unique_dept_site_code',
+            ),
+        ]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        errors = {}
+
+        # Auto-fill and validate client from site
+        if self.site_id:
+            from apps.sites.models import SiteProfile
+            try:
+                site_obj = SiteProfile.objects.select_related('client').get(pk=self.site_id)
+            except SiteProfile.DoesNotExist:
+                site_obj = None
+
+            if site_obj is not None:
+                if site_obj.org_id != self.org_id:
+                    errors['site'] = 'Site must belong to the same organization.'
+                else:
+                    if not self.client_id:
+                        self.client_id = site_obj.client_id
+                    elif self.client_id != site_obj.client_id:
+                        errors['client'] = (
+                            f'Client must match the site\'s client '
+                            f'(expected client id {site_obj.client_id}).'
+                        )
+
+        # Validate client org consistency
+        if self.client_id and not errors.get('client'):
+            from apps.sites.models import Client
+            try:
+                client_obj = Client.objects.get(pk=self.client_id)
+                if client_obj.org_id != self.org_id:
+                    errors['client'] = 'Client must belong to the same organization.'
+            except Client.DoesNotExist:
+                pass
+
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self):
+        if self.site_id:
+            return f"{self.name} (site:{self.site_id})"
+        if self.client_id:
+            return f"{self.name} (client:{self.client_id})"
+        return f"{self.name} ({self.org})"

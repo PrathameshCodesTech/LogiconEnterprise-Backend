@@ -1,9 +1,14 @@
-from rest_framework import viewsets, generics
+from rest_framework import status, viewsets, generics
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.viewsets import ModelViewSet
 
-from .models import Organization, ScopeNode
-from .serializers import OrganizationSerializer, ScopeNodeSerializer
+from apps.access.permissions import HasCapability
+from apps.access.viewsets import ActionCapabilityMixin
+
+from .models import Organization, ScopeNode, Department
+from .serializers import OrganizationSerializer, ScopeNodeSerializer, DepartmentSerializer, DepartmentWriteSerializer
 
 
 class MeView(generics.RetrieveAPIView):
@@ -62,3 +67,64 @@ class ScopeNodeViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     filterset_fields = ['node_type', 'is_active', 'org', 'parent']
     search_fields = ['name', 'code', 'path']
+
+
+class DepartmentViewSet(ActionCapabilityMixin, ModelViewSet):
+    """
+    Full CRUD for Department master data.
+    Scoped to the actor's org; superusers see all.
+    Soft-delete: DELETE sets is_active=False.
+    """
+    permission_classes = [IsAuthenticated, HasCapability]
+    filterset_fields = ['org', 'client', 'site', 'is_active']
+    search_fields = ['name', 'code', 'description', 'client__name', 'site__name']
+
+    action_required_capabilities = {
+        'list':           'department.read',
+        'retrieve':       'department.read',
+        'create':         'department.create',
+        'update':         'department.update',
+        'partial_update': 'department.update',
+        'destroy':        'department.delete',
+    }
+
+    def get_queryset(self):
+        qs = Department.objects.select_related('org', 'client', 'site').order_by('org', 'name')
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        org_id = getattr(user, 'org_id', None)
+        if org_id:
+            return qs.filter(org_id=org_id)
+        return qs.none()
+
+    def get_serializer_class(self):
+        if self.action in ('create', 'update', 'partial_update'):
+            return DepartmentWriteSerializer
+        return DepartmentSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        actor = request.user
+        org = serializer.validated_data.get('org') if actor.is_superuser else actor.org
+        if not org:
+            raise ValidationError({'detail': 'Your account has no organization set.'})
+
+        instance = serializer.save(org=org)
+        out = DepartmentSerializer(instance, context={'request': request})
+        return Response(out.data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        instance = serializer.save()
+        out = DepartmentSerializer(instance, context={'request': request})
+        return Response(out.data)
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=['is_active', 'updated_at'])

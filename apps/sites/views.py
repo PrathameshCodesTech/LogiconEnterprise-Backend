@@ -33,7 +33,7 @@ from .serializers import (
     SiteRoleRequirementSerializer,
     SiteRoleRequirementWriteSerializer,
 )
-from .services import _node_code_from, create_client_with_scope, create_site_with_scope
+from .services import _node_code_from, apply_location_snapshots, create_client_with_scope, create_site_with_scope
 
 
 class ClientViewSet(ScopedModelViewSet):
@@ -109,7 +109,7 @@ class ClientViewSet(ScopedModelViewSet):
 
 class SiteProfileViewSet(ScopedModelViewSet):
     queryset = SiteProfile.objects.select_related(
-        'org', 'client', 'client__scope_node', 'scope_node', 'created_by',
+        'org', 'client', 'client__scope_node', 'scope_node', 'created_by', 'location_area',
     ).order_by('name')
     permission_classes = [IsAuthenticated, HasCapability]
     scope_filter = filter_sites_for_user
@@ -165,12 +165,30 @@ class SiteProfileViewSet(ScopedModelViewSet):
             **{k: v for k, v in serializer.validated_data.items()
                if k not in ('client', 'name', 'code')},
         )
+        changed = apply_location_snapshots(site)
+        if changed:
+            update_fields = []
+            if site.city:
+                update_fields.append('city')
+            if site.state:
+                update_fields.append('state')
+            if update_fields:
+                site.save(update_fields=update_fields)
         log_audit(actor, 'site.create', site, request=request)
         out = SiteProfileSerializer(site, context={'request': request})
         return Response(out.data, status=status.HTTP_201_CREATED)
 
     def perform_update(self, serializer):
         site = serializer.save()
+        changed = apply_location_snapshots(site)
+        if changed:
+            update_fields = []
+            if site.city:
+                update_fields.append('city')
+            if site.state:
+                update_fields.append('state')
+            if update_fields:
+                site.save(update_fields=update_fields)
         log_audit(self.request.user, 'site.update', site, request=self.request)
 
     def perform_destroy(self, instance):
@@ -228,6 +246,79 @@ class SiteRoleRequirementViewSet(ScopedModelViewSet):
             return SiteRoleRequirementWriteSerializer
         return SiteRoleRequirementSerializer
 
+    def _apply_wage_lookup(self, req, validated_data, is_create):
+        """
+        Run wage lookup and populate wage_rate FK + snapshot fields.
+
+        On create: always run lookup; auto-fill wage_min if blank.
+        On update: only re-run if a lookup-relevant field changed in validated_data.
+        Never overwrites a manually supplied wage_min.
+        """
+        import datetime
+        from apps.wages.services import get_applicable_minimum_wage
+
+        lookup_keys = {'site', 'job_role', 'wage_category', 'effective_from'}
+        should_lookup = is_create or bool(lookup_keys & validated_data.keys())
+        if not should_lookup:
+            return
+
+        site = req.site
+        job_role = req.job_role
+        wage_category = req.wage_category
+        effective_from = req.effective_from
+
+        if not (site and wage_category and effective_from):
+            return
+
+        on_date = effective_from if isinstance(effective_from, datetime.date) else datetime.date.today()
+        org = getattr(req.site, 'org', None)
+
+        rate = get_applicable_minimum_wage(
+            wage_category=wage_category,
+            on_date=on_date,
+            site=site,
+            role=job_role,
+            org=org,
+        )
+
+        update_fields = []
+
+        if rate is not None:
+            req.wage_rate = rate
+            req.wage_rate_monthly_snapshot = rate.monthly_wage
+            req.wage_rate_daily_snapshot = rate.daily_wage
+            req.wage_rate_effective_from_snapshot = rate.effective_from
+            req.wage_rate_source_snapshot = rate.source_note
+            update_fields += [
+                'wage_rate', 'wage_rate_monthly_snapshot', 'wage_rate_daily_snapshot',
+                'wage_rate_effective_from_snapshot', 'wage_rate_source_snapshot',
+            ]
+
+            # Auto-fill wage_min only if it was not explicitly provided by the caller
+            wage_min_provided = 'wage_min' in validated_data
+            if not wage_min_provided and req.wage_min is None:
+                req.wage_min = rate.monthly_wage
+                update_fields.append('wage_min')
+
+        if update_fields:
+            req.save(update_fields=update_fields)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        out = SiteRoleRequirementSerializer(serializer.instance, context={'request': request})
+        return Response(out.data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        out = SiteRoleRequirementSerializer(serializer.instance, context={'request': request})
+        return Response(out.data)
+
     def perform_create(self, serializer):
         actor = self.request.user
         site = serializer.validated_data['site']
@@ -237,10 +328,12 @@ class SiteRoleRequirementViewSet(ScopedModelViewSet):
                     "You do not have scope access to create requirements for this site."
                 )
         req = serializer.save()
+        self._apply_wage_lookup(req, serializer.validated_data, is_create=True)
         log_audit(actor, 'site_role_requirement.create', req, request=self.request)
 
     def perform_update(self, serializer):
         req = serializer.save()
+        self._apply_wage_lookup(req, serializer.validated_data, is_create=False)
         log_audit(self.request.user, 'site_role_requirement.update', req, request=self.request)
 
     def perform_destroy(self, instance):

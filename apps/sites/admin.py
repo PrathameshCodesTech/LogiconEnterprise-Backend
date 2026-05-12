@@ -17,13 +17,13 @@ class ClientAdmin(admin.ModelAdmin):
 @admin.register(SiteProfile)
 class SiteProfileAdmin(admin.ModelAdmin):
     list_display = [
-        'name', 'code', 'org', 'client', 'city', 'state',
+        'name', 'code', 'org', 'client', 'location_area', 'city', 'state',
         'shift_type', 'contact_person', 'is_active',
     ]
     search_fields = ['name', 'code', 'city', 'state', 'address', 'contact_person']
-    list_filter = ['is_active', 'shift_type', 'org', 'client']
+    list_filter = ['is_active', 'shift_type', 'org', 'client', 'location_area']
     readonly_fields = ['created_at', 'updated_at']
-    raw_id_fields = ['org', 'client', 'scope_node', 'created_by']
+    raw_id_fields = ['org', 'client', 'scope_node', 'created_by', 'location_area']
 
 
 @admin.register(SiteCommercial)
@@ -41,8 +41,14 @@ class SiteRoleRequirementAdmin(admin.ModelAdmin):
         'site', 'job_role', 'approved_headcount', 'billing_type',
         'billing_rate', 'wage_min', 'wage_max', 'wage_category',
         'shift_hours', 'effective_from', 'effective_to', 'is_active',
+        'wage_rate',
     ]
     search_fields = ['site__name', 'site__code', 'job_role__name']
     list_filter = ['is_active', 'billing_type', 'job_role', 'wage_category']
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = [
+        'wage_rate',
+        'wage_rate_monthly_snapshot', 'wage_rate_daily_snapshot',
+        'wage_rate_effective_from_snapshot', 'wage_rate_source_snapshot',
+        'created_at', 'updated_at',
+    ]
     raw_id_fields = ['site', 'job_role', 'wage_category']
