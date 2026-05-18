@@ -423,6 +423,16 @@ class Command(BaseCommand):
             ('Silverline Hospitals Pvt Ltd', 'SILVERLINE-HSP', 'Pooja Deshmukh', 'Nikhil Jain'),
             ('UrbanGrid Malls Pvt Ltd', 'URBANGRID-MALLS', 'Ishita Banerjee', 'Rohit Verma'),
             ('Greenfield Industrial Parks Pvt Ltd', 'GREENFIELD-IP', 'Neha Chatterjee', 'Manish Pillai'),
+            ('PrimeNest Residences Pvt Ltd', 'PRIMENEST-RES', 'Aarohi Sinha', 'Kabir Anand'),
+            ('MetroAxis Business Parks Pvt Ltd', 'METROAXIS-BP', 'Tanvi Mehra', 'Siddharth Khanna'),
+            ('NorthStar Warehousing Pvt Ltd', 'NORTHSTAR-WH', 'Maya Krishnan', 'Harsh Vora'),
+            ('ClearPath Healthcare Pvt Ltd', 'CLEARPATH-HC', 'Radhika Bose', 'Amit Tandon'),
+            ('SummitEdge Technologies Pvt Ltd', 'SUMMITEDGE-TECH', 'Anika Nair', 'Varun Sethi'),
+            ('LotusGate Hospitality Pvt Ltd', 'LOTUSGATE-HSP', 'Kavya Reddy', 'Pranav Shetty'),
+            ('HarborView Retail Pvt Ltd', 'HARBORVIEW-RTL', 'Sonal Gupta', 'Akash Malhotra'),
+            ('TerraNova Estates Pvt Ltd', 'TERRANOVA-EST', 'Mitali Joshi', 'Raghav Bansal'),
+            ('QuantumWorks Manufacturing Pvt Ltd', 'QUANTUMWORKS-MFG', 'Shreya Iyer', 'Naveen Rao'),
+            ('Skyline Civic Services Pvt Ltd', 'SKYLINE-CS', 'Dia Fernandes', 'Omkar Kulkarni'),
         ]
         seeded = []
         for index, (name, code, primary_user, ops_user) in enumerate(clients, start=1):
