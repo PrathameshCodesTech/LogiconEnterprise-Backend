@@ -348,6 +348,13 @@ class Command(BaseCommand):
             site=None,
             defaults={'template': template, 'is_active': True},
         )
+        ApprovalRoute.objects.filter(
+            org=self.org,
+            trigger_type='client_onboarding',
+            client__isnull=True,
+            site__isnull=True,
+            is_default=True,
+        ).exclude(code='client_onboarding_standard_route').update(is_default=False)
         route, _ = ApprovalRoute.objects.update_or_create(
             org=self.org,
             code='client_onboarding_standard_route',
