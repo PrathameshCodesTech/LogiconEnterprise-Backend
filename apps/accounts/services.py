@@ -24,7 +24,7 @@ def send_user_invite_email(user, *, context_label=None):
     """
     uid = urlsafe_base64_encode(force_bytes(user.pk))
     token = PasswordResetTokenGenerator().make_token(user)
-    frontend_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://127.0.0.1:5173').rstrip('/')
+    frontend_url = (getattr(settings, 'FRONTEND_BASE_URL', '') or 'http://127.0.0.1:5173').strip().rstrip('/')
     invite_url = f"{frontend_url}/set-password?uid={uid}&token={token}"
 
     label = context_label or 'Your account'
