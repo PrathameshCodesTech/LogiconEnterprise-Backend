@@ -418,6 +418,11 @@ class Command(BaseCommand):
             ('Apex Infra Services Pvt Ltd', 'APEX-INFRA', 'Nisha Rao', 'Dev Patel'),
             ('Orion Retail Parks Pvt Ltd', 'ORION-RP', 'Ananya Sen', 'Rahul Nair'),
             ('Zenith Manufacturing Pvt Ltd', 'ZENITH-MFG', 'Priya Kulkarni', 'Sameer Joshi'),
+            ('Meridian Corporate Services Pvt Ltd', 'MERIDIAN-CS', 'Lavanya Menon', 'Aditya Rao'),
+            ('BluePeak Logistics Pvt Ltd', 'BLUEPEAK-LOG', 'Sneha Kapoor', 'Vikram Bhat'),
+            ('Silverline Hospitals Pvt Ltd', 'SILVERLINE-HSP', 'Pooja Deshmukh', 'Nikhil Jain'),
+            ('UrbanGrid Malls Pvt Ltd', 'URBANGRID-MALLS', 'Ishita Banerjee', 'Rohit Verma'),
+            ('Greenfield Industrial Parks Pvt Ltd', 'GREENFIELD-IP', 'Neha Chatterjee', 'Manish Pillai'),
         ]
         seeded = []
         for index, (name, code, primary_user, ops_user) in enumerate(clients, start=1):
