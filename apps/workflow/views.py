@@ -14,7 +14,7 @@ from django.shortcuts import get_object_or_404
 
 from apps.access.permissions import HasCapability, HasAnyCapability
 
-from .exceptions import WorkflowConfigurationError
+from .exceptions import OnboardingPreflightError, WorkflowConfigurationError
 from .serializers import (
     WorkflowInstanceSerializer,
     WorkflowStepInstanceSerializer,
@@ -627,6 +627,11 @@ class ActOnStepView(APIView):
                 actor=request.user,
                 action=serializer.validated_data['action'],
                 comment=serializer.validated_data.get('comment', ''),
+            )
+        except OnboardingPreflightError as exc:
+            return Response(
+                {'detail': str(exc), 'errors': exc.preflight_errors},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         except WorkflowConfigurationError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

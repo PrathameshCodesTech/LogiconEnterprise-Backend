@@ -9,7 +9,7 @@ from datetime import timedelta
 from django.db import models, transaction
 from django.utils import timezone
 
-from .exceptions import WorkflowConfigurationError
+from .exceptions import OnboardingPreflightError, WorkflowConfigurationError
 
 
 # ─── Public: resolution helpers ───────────────────────────────────────────────
@@ -689,6 +689,17 @@ def act_on_step(step_instance, actor, action, comment=''):
                 'A comment is required when requesting changes on this step.'
             )
 
+        # Preflight: block final approval when onboarding data has known conflicts
+        if action == 'approve' and _is_final_onboarding_approve(step_instance):
+            from apps.onboarding.services import validate_onboarding_finalization_preflight
+            req = step_instance.workflow.client_onboarding_request
+            preflight_errors = validate_onboarding_finalization_preflight(req)
+            if preflight_errors:
+                raise OnboardingPreflightError(
+                    'Onboarding cannot be finalized.',
+                    preflight_errors,
+                )
+
         action_to_status = {
             'approve': 'approved',
             'reject': 'rejected',
@@ -764,6 +775,21 @@ def reassign_step(step_instance, actor, new_user, comment=''):
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
+
+def _is_final_onboarding_approve(step_instance):
+    """Return True if approving this step would complete a client_onboarding workflow."""
+    if step_instance.workflow.client_onboarding_request_id is None:
+        return False
+    target_code = step_instance.on_approve_next
+    if target_code == 'END':
+        return True
+    if target_code:
+        return not step_instance.workflow.steps.filter(step_code=target_code).exists()
+    # Sequential path: final if no pending step comes after this one
+    return not step_instance.workflow.steps.filter(
+        step_order__gt=step_instance.step_order, status='pending',
+    ).exists()
+
 
 def _assert_template_active(template):
     if not template.is_active:

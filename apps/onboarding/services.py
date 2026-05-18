@@ -146,6 +146,112 @@ def _check_new_site_expansion(req, errors, warnings):
             warnings.append("Proposed sites exist but no site-level users have been added.")
 
 
+# ─── Preflight ────────────────────────────────────────────────────────────────
+
+def validate_onboarding_finalization_preflight(request) -> list:
+    """
+    Return a list of blocking error strings that would cause finalization to fail
+    for known, detectable reasons.
+
+    Checks:
+      - new_client: proposed_client_code not already taken as an active Client.
+      - Proposed site codes not already taken as active SiteProfile codes.
+      - Proposed budget plan codes not already taken as active BudgetPlan codes.
+      - Proposed users' emails not already in use (skips already-finalized users).
+      - Site-scoped proposed users have an active proposed site.
+      - Proposed SRRs reference an active proposed site.
+      - Proposed SRR proposed_department (if set) is active and in same request.
+      - Department-level proposed budgets have active proposed site and department.
+      - Site-level proposed budgets have an active proposed site.
+      - Proposed user access_role is active.
+
+    Returns [] when no blocking issues are found.
+    """
+    from apps.access.models import AccessRole
+    from apps.accounts.models import User as UserModel
+    from apps.budgets.models import BudgetPlan
+    from apps.sites.models import Client, SiteProfile
+
+    errors = []
+    org = request.org
+
+    # 1. Duplicate client code (new_client only)
+    if request.onboarding_type == 'new_client':
+        code = (request.proposed_client_code or '').strip()
+        if code and Client.objects.filter(org=org, code=code, is_active=True).exists():
+            errors.append(f"Client code '{code}' already exists in this organization.")
+
+    # Index active proposed items for cross-referencing
+    active_sites = {s.pk: s for s in request.proposed_sites.filter(is_active=True)}
+    active_depts = {d.pk: d for d in request.proposed_departments.filter(is_active=True)}
+
+    # 2. Duplicate site codes
+    for p_site in active_sites.values():
+        if SiteProfile.objects.filter(org=org, code=p_site.code, is_active=True).exists():
+            errors.append(f"Site code '{p_site.code}' already exists in this organization.")
+
+    # 3, 9, 10: Budget plan checks
+    for p_budget in request.proposed_budgets.filter(is_active=True):
+        if BudgetPlan.objects.filter(org=org, code=p_budget.code, is_active=True).exists():
+            errors.append(
+                f"Budget plan code '{p_budget.code}' already exists in this organization."
+            )
+        if p_budget.scope_level == 'site':
+            if p_budget.proposed_site_id is None or p_budget.proposed_site_id not in active_sites:
+                errors.append(
+                    f"Budget '{p_budget.code}' (site-level) references an inactive or missing proposed site."
+                )
+        elif p_budget.scope_level == 'department':
+            if p_budget.proposed_site_id is None or p_budget.proposed_site_id not in active_sites:
+                errors.append(
+                    f"Budget '{p_budget.code}' (department-level) references an inactive or missing proposed site."
+                )
+            if (
+                p_budget.proposed_department_id is None
+                or p_budget.proposed_department_id not in active_depts
+            ):
+                errors.append(
+                    f"Budget '{p_budget.code}' (department-level) references an inactive or missing proposed department."
+                )
+
+    # 4, 6, 11: Proposed user checks
+    for p_user in request.proposed_users.filter(is_active=True):
+        if p_user.created_user_id is not None:
+            continue  # already finalized — skip all checks for this user
+
+        email = (p_user.email or '').strip().lower()
+
+        # 4. Duplicate email
+        if email and UserModel.objects.filter(email=email).exists():
+            errors.append(f"User email '{email}' already exists.")
+
+        # 6. Site-scoped user needs an active proposed site
+        if p_user.scope_level == 'site':
+            if p_user.proposed_site_id is None or p_user.proposed_site_id not in active_sites:
+                errors.append(
+                    f"Proposed user '{email}' is site-scoped but has no active proposed site."
+                )
+
+        # 11. Access role must be active
+        if p_user.access_role_id is not None:
+            if not AccessRole.objects.filter(pk=p_user.access_role_id, is_active=True).exists():
+                errors.append(f"Proposed user '{email}' has an inactive access role.")
+
+    # 7, 8: Proposed SRR checks
+    for p_srr in request.proposed_role_requirements.filter(is_active=True):
+        if p_srr.proposed_site_id not in active_sites:
+            errors.append(
+                f"Proposed role requirement (pk={p_srr.pk}) references an inactive or missing proposed site."
+            )
+        if p_srr.proposed_department_id is not None:
+            if p_srr.proposed_department_id not in active_depts:
+                errors.append(
+                    f"Proposed role requirement (pk={p_srr.pk}) references an inactive or missing proposed department."
+                )
+
+    return errors
+
+
 # ─── Public ───────────────────────────────────────────────────────────────────
 
 def finalize_client_onboarding_request(request, actor=None):
