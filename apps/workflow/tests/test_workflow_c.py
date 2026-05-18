@@ -19,6 +19,7 @@ from apps.access.models import AccessRole, UserRoleAssignment
 from apps.core.models import Organization, ScopeNode, Department
 from apps.mrf.models import ManpowerRequest
 from apps.sites.models import Client, SiteProfile
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.workflow.exceptions import WorkflowConfigurationError
 from apps.workflow.models import (
     WorkflowTemplate, WorkflowStepTemplate,
@@ -94,6 +95,7 @@ class WorkflowCTestBase(TestCase):
 
         cls.role_admin = _role(cls.org, 'admin')
         cls.role_reassign = _role(cls.org, 'workflow_reassign')
+        bootstrap_role_permissions(cls.role_admin)
 
         # Actor who will start/reassign workflows
         cls.actor = _user('wfc_actor', org=cls.org)

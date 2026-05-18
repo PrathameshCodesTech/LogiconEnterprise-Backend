@@ -37,6 +37,8 @@ Scenarios:
   31. actor_type 'field' is accepted (Fix 3)
 """
 
+from datetime import date
+
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -44,8 +46,10 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
 from apps.core.models import Organization, ScopeNode
-from apps.mrf.models import ManpowerRequest
-from apps.sites.models import Client, SiteProfile
+from apps.jobs.models import JobRole
+from apps.mrf.models import ManpowerRequest, MRFLineItem
+from apps.sites.models import Client, SiteProfile, SiteRoleRequirement
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.workflow.exceptions import WorkflowConfigurationError
 from apps.workflow.models import (
     WorkflowTemplate, WorkflowStepTemplate,
@@ -168,6 +172,10 @@ class WorkflowTestBase(TestCase):
         cls.role_hr_admin = _role(cls.org, 'hr_admin')
         cls.role_hr_exec = _role(cls.org, 'hr_executive')
         cls.role_finance = _role(cls.org, 'finance')
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_hr_admin)
+        bootstrap_role_permissions(cls.role_hr_exec)
+        bootstrap_role_permissions(cls.role_finance)
 
         cls.superuser = _user('wf_super', is_superuser=True)
         cls.admin = _user('wf_admin', org=cls.org)
@@ -207,8 +215,20 @@ class WorkflowTestBase(TestCase):
         cls.sac1 = _sac(cls.org, 'hr_review', cls.hr_admin)
         cls.sac2 = _sac(cls.org, 'finance_review', cls.finance_user)
 
-        # MRF for testing
+        # MRF for testing — must have a billable line item for readiness gate
         cls.mrf = _mrf(cls.org, cls.site, cls.hr_exec)
+        cls.job_role = JobRole.objects.create(
+            org=cls.org, name='WF Guard', code='wf-guard', skill_category='unskilled',
+        )
+        cls.srr = SiteRoleRequirement.objects.create(
+            site=cls.site, job_role=cls.job_role,
+            approved_headcount=20, billing_type='billable',
+            effective_from=date.today(), is_active=True,
+        )
+        MRFLineItem.objects.create(
+            mrf=cls.mrf, job_role=cls.job_role,
+            site_role_requirement=cls.srr, headcount=2,
+        )
 
     def _api(self, user=None):
         c = APIClient()
@@ -301,6 +321,12 @@ class TestStartMRFWorkflow(WorkflowTestBase):
 
     def setUp(self):
         self.local_mrf = _mrf(self.org, self.site, self.hr_exec)
+        MRFLineItem.objects.create(
+            mrf=self.local_mrf,
+            job_role=self.job_role,
+            site_role_requirement=self.srr,
+            headcount=2,
+        )
 
     def test_unauthenticated_returns_401(self):
         resp = self._api().post(_start_url(self.local_mrf.pk))
@@ -413,6 +439,7 @@ class TestWorkflowInstanceDetail(WorkflowTestBase):
         # Give org2_user the hr_admin role (so they have workflow.read) but in org2
         org2_node = _node(self.org2, 'wf-org2', 'company', None, 0, 'wf-org2')
         org2_role = _role(self.org2, 'hr_admin')
+        bootstrap_role_permissions(org2_role)
         org2_user = _user('wf_o2_reader', org=self.org2)
         _assign(org2_user, org2_role, org2_node)
         resp = self._api(org2_user).get(_detail_url(self.instance.pk))

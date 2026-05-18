@@ -79,6 +79,29 @@ def filter_sites_for_user(queryset, user):
     return queryset.filter(site_q | client_q).distinct()
 
 
+def filter_departments_for_user(queryset, user):
+    """
+    Filter Department queryset.
+
+    Department can be org-level, client-level, or site-level. Scope access grants:
+      - assigned client: client-level departments and child site departments
+      - assigned site: departments for that site
+      - assigned org/company node: org-level departments plus all descendants
+    """
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    org_id = getattr(user, 'org_id', None)
+    if org_id and any('/' not in p for p in paths):
+        return queryset.filter(org_id=org_id).distinct()
+    client_q = _scope_q('client__scope_node__path', paths)
+    site_q = _scope_q('site__scope_node__path', paths)
+    site_client_q = _scope_q('site__client__scope_node__path', paths)
+    return queryset.filter(client_q | site_q | site_client_q).distinct()
+
+
 def filter_site_role_requirements_for_user(queryset, user):
     """
     Filter SiteRoleRequirement queryset via site.scope_node path.
@@ -96,14 +119,18 @@ def filter_site_role_requirements_for_user(queryset, user):
 def filter_onboarding_requests_for_user(queryset, user):
     """
     Filter ClientOnboardingRequest queryset via client.scope_node path.
-    Internal onboarding requests are org/client scoped — no site level.
+    new_client requests (client is null) are org-scoped: visible to any user in the same org
+    who has at least one scope assignment (capability gate already enforced by the view).
     """
     if user.is_superuser:
         return queryset
     paths = get_accessible_scope_paths(user)
     if not paths:
         return queryset.none()
-    return queryset.filter(_scope_q('client__scope_node__path', paths)).distinct()
+    org_id = getattr(user, 'org_id', None)
+    client_q = _scope_q('client__scope_node__path', paths)
+    no_client_q = Q(client__isnull=True, org_id=org_id) if org_id else Q(pk__in=[])
+    return queryset.filter(client_q | no_client_q).distinct()
 
 
 def filter_mrfs_for_user(queryset, user):
@@ -132,6 +159,34 @@ def filter_mrf_line_items_for_user(queryset, user):
     site_q = _scope_q('mrf__site__scope_node__path', paths)
     client_q = _scope_q('mrf__site__client__scope_node__path', paths)
     return queryset.filter(site_q | client_q).distinct()
+
+
+def filter_budget_plans_for_user(queryset, user):
+    """
+    Filter BudgetPlan queryset by the user's scope.
+
+    BudgetPlan can be client-, site-, department-, or org-scoped. Client-scoped
+    users should see budgets for their client and child sites/departments, not
+    unrelated org budgets.
+    """
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    org_id = getattr(user, 'org_id', None)
+    if org_id and any('/' not in p for p in paths):
+        return queryset.filter(org_id=org_id).distinct()
+    client_q = _scope_q('client__scope_node__path', paths)
+    site_q = _scope_q('site__scope_node__path', paths)
+    site_client_q = _scope_q('site__client__scope_node__path', paths)
+    dept_client_q = _scope_q('department__client__scope_node__path', paths)
+    dept_site_q = _scope_q('department__site__scope_node__path', paths)
+    dept_site_client_q = _scope_q('department__site__client__scope_node__path', paths)
+    return queryset.filter(
+        client_q | site_q | site_client_q |
+        dept_client_q | dept_site_q | dept_site_client_q
+    ).distinct()
 
 
 def filter_hiring_applications_for_user(queryset, user):
@@ -237,6 +292,61 @@ def filter_users_for_user(queryset, user):
     if not org_id:
         return queryset.none()
     return queryset.filter(org_id=org_id)
+
+
+def filter_candidates_for_user(queryset, user):
+    """
+    Filter Candidate queryset to candidates in the user's org.
+    Candidates are org-scoped assets — any user with a scope assignment in
+    the same org can see all candidates regardless of site/client.
+    """
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    org_id = getattr(user, 'org_id', None)
+    if not org_id:
+        return queryset.none()
+    return queryset.filter(org_id=org_id)
+
+
+def filter_resumes_for_user(queryset, user):
+    """Filter Resume queryset to resumes whose candidate belongs to user's org."""
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    org_id = getattr(user, 'org_id', None)
+    if not org_id:
+        return queryset.none()
+    return queryset.filter(candidate__org_id=org_id)
+
+
+def filter_pipeline_stages_for_user(queryset, user):
+    """Filter PipelineStage queryset to stages in user's org."""
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    org_id = getattr(user, 'org_id', None)
+    if not org_id:
+        return queryset.none()
+    return queryset.filter(org_id=org_id)
+
+
+def filter_match_results_for_user(queryset, user):
+    """Filter CandidateMatchResult queryset via mrf_line_item → mrf → site scope."""
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    site_q = _scope_q('mrf_line_item__mrf__site__scope_node__path', paths)
+    client_q = _scope_q('mrf_line_item__mrf__site__client__scope_node__path', paths)
+    return queryset.filter(site_q | client_q).distinct()
 
 
 def filter_employees_for_user(queryset, user):

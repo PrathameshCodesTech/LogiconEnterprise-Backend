@@ -15,7 +15,10 @@ Scope: users are org-scoped. Only roles that carry user.* capabilities
 """
 
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView
 
 from apps.access.permissions import HasCapability
 from apps.access.querysets import filter_users_for_user
@@ -23,7 +26,25 @@ from apps.access.viewsets import ScopedModelViewSet
 from apps.audit.services import log_audit
 
 from .models import User, normalize_phone_number
-from .serializers import UserListSerializer, UserCreateSerializer, UserUpdateSerializer
+from .serializers import (
+    UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
+    EmailTokenObtainPairSerializer, SetPasswordSerializer,
+)
+
+
+class EmailTokenObtainPairView(TokenObtainPairView):
+    serializer_class = EmailTokenObtainPairSerializer
+
+
+class SetPasswordView(APIView):
+    """POST /api/accounts/set-password/ — set password via uid+token (no auth required)."""
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        serializer = SetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({'detail': 'Password set successfully.'})
 
 
 def _validate_department_org(department, org, label='department'):

@@ -13,6 +13,45 @@ from django.db import models
 from apps.core.models import Organization, TimeStampedModel
 
 
+# ─── PipelineStage ────────────────────────────────────────────────────────────
+
+class PipelineStage(models.Model):
+    """A named stage in the hiring pipeline, scoped per org."""
+
+    STAGE_TYPE_CHOICES = [
+        ('sourcing', 'Sourcing'),
+        ('screening', 'Screening'),
+        ('interview', 'Interview'),
+        ('offer', 'Offer'),
+        ('onboarding', 'Onboarding'),
+    ]
+
+    org = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='pipeline_stages')
+    name = models.CharField(max_length=128)
+    code = models.CharField(max_length=32)
+    order = models.PositiveSmallIntegerField(default=0)
+    stage_type = models.CharField(max_length=20, choices=STAGE_TYPE_CHOICES)
+    is_terminal = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = 'Pipeline Stage'
+        verbose_name_plural = 'Pipeline Stages'
+        ordering = ['org', 'order']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['org', 'code'],
+                condition=models.Q(is_active=True),
+                name='unique_active_pipeline_stage_code_per_org',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.org} — {self.name} ({self.code})"
+
+
+# ─── HiringApplication ────────────────────────────────────────────────────────
+
 class HiringApplication(TimeStampedModel):
     """
     Links a candidate to a specific MRF line item and tracks hiring status.
@@ -87,6 +126,13 @@ class HiringApplication(TimeStampedModel):
         help_text='Optional AI/manual match score out of 100.',
     )
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft')
+    current_stage = models.ForeignKey(
+        PipelineStage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='current_applications',
+    )
 
     shortlisted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -134,6 +180,104 @@ class HiringApplication(TimeStampedModel):
     def __str__(self):
         return f"Application #{self.pk} — {self.candidate} → {self.job_role} ({self.status})"
 
+
+# ─── ApplicationStageHistory ──────────────────────────────────────────────────
+
+class ApplicationStageHistory(models.Model):
+    """Audit log of stage and status transitions for a hiring application."""
+    hiring_application = models.ForeignKey(
+        HiringApplication, on_delete=models.CASCADE, related_name='stage_history',
+    )
+    from_stage = models.ForeignKey(
+        PipelineStage, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    to_stage = models.ForeignKey(
+        PipelineStage, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    from_status = models.CharField(max_length=32, blank=True)
+    to_status = models.CharField(max_length=32, blank=True)
+    moved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='application_stage_moves',
+    )
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Application Stage History'
+        verbose_name_plural = 'Application Stage Histories'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return (
+            f"StageHistory #{self.pk} — App #{self.hiring_application_id} "
+            f"{self.from_status}→{self.to_status}"
+        )
+
+
+# ─── CandidateMatchResult ─────────────────────────────────────────────────────
+
+class CandidateMatchResult(models.Model):
+    """AI or manual match score between a candidate and an MRF line item."""
+
+    MATCH_SOURCE_CHOICES = [
+        ('manual', 'Manual'),
+        ('ai', 'AI'),
+        ('rules', 'Rules-Based'),
+    ]
+
+    org = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='match_results')
+    candidate = models.ForeignKey(
+        'talent.Candidate', on_delete=models.CASCADE, related_name='match_results',
+    )
+    mrf_line_item = models.ForeignKey(
+        'mrf.MRFLineItem', on_delete=models.CASCADE, related_name='match_results',
+    )
+    # Legacy summary score — kept for backward compatibility; prefer final_score going forward
+    match_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
+    # ── Score breakdown ───────────────────────────────────────────────────────
+    final_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    role_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    skill_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    experience_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    location_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    industry_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    education_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    salary_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    semantic_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
+    matched_skills = models.JSONField(default=list, blank=True)
+    missing_skills = models.JSONField(default=list, blank=True)
+    match_reason = models.JSONField(default=list, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    match_details = models.JSONField(default=dict, blank=True)
+
+    match_source = models.CharField(max_length=16, choices=MATCH_SOURCE_CHOICES, default='manual')
+    is_auto_match = models.BooleanField(default=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='created_match_results',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Candidate Match Result'
+        verbose_name_plural = 'Candidate Match Results'
+        ordering = ['-final_score', '-match_score']
+        indexes = [
+            models.Index(fields=['candidate', 'mrf_line_item']),
+            models.Index(fields=['org', 'match_source']),
+        ]
+
+    def __str__(self):
+        score = self.final_score if self.final_score is not None else self.match_score
+        return f"MatchResult #{self.pk} — {self.candidate} → MRFLine #{self.mrf_line_item_id} ({score})"
+
+
+# ─── Interview ────────────────────────────────────────────────────────────────
 
 class Interview(TimeStampedModel):
     """A scheduled interview round for a hiring application."""

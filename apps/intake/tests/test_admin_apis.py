@@ -14,6 +14,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.sites.models import Client, SiteProfile
@@ -128,6 +129,10 @@ class IntakeAdminTestBase(TestCase):
         cls.r_client_user = _role(cls.org, 'client_user')
         # finance role has no submission.read or campaign.read
         cls.r_finance = _role(cls.org, 'finance')
+        bootstrap_role_permissions(cls.r_hr_admin)
+        bootstrap_role_permissions(cls.r_hr_exec)
+        bootstrap_role_permissions(cls.r_client_user)
+        bootstrap_role_permissions(cls.r_finance)
 
         cls.hr_admin = _user('ia_hr_admin', cls.org, cls.r_hr_admin, cls.n_co)
         cls.hr_exec = _user('ia_hr_exec', cls.org, cls.r_hr_exec, cls.n_co)

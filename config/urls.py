@@ -6,17 +6,16 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
-)
+from rest_framework_simplejwt.views import TokenRefreshView
+
+from apps.accounts.views import EmailTokenObtainPairView
 
 urlpatterns = [
     # Django Admin
     path('lms-console/', admin.site.urls),
 
-    # JWT Authentication
-    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    # JWT Authentication (email + password)
+    path('api/token/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 
     # App APIs
@@ -36,6 +35,8 @@ urlpatterns = [
     path('api/access/', include('apps.access.urls')),
     path('api/hiring/', include('apps.hiring.urls')),
     path('api/deployment/', include('apps.deployment.urls')),
+    path('api/budgets/', include('apps.budgets.urls')),
+    path('api/dashboard/', include('apps.dashboard.urls')),
 ]
 
 if settings.DEBUG:

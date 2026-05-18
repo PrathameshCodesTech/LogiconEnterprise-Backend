@@ -76,6 +76,11 @@ class User(AbstractUser):
                 condition=~models.Q(employee_code=''),
                 name='unique_user_employee_code_per_org',
             ),
+            models.UniqueConstraint(
+                fields=['email'],
+                condition=~models.Q(email=''),
+                name='unique_user_email_when_set',
+            ),
         ]
 
     def __str__(self):
@@ -83,4 +88,6 @@ class User(AbstractUser):
 
     def save(self, *args, **kwargs):
         self.phone_normalized = normalize_phone_number(self.phone_number)
+        if self.email:
+            self.email = self.email.strip().lower()
         super().save(*args, **kwargs)

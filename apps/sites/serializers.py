@@ -7,6 +7,7 @@ Write serializers accept input — org/scope_node/created_by are set by the view
 
 from rest_framework import serializers
 
+from apps.core.models import Department
 from apps.wages.models import LocationArea
 from .models import Client, SiteProfile, SiteCommercial, SiteRoleRequirement
 
@@ -107,12 +108,23 @@ class SiteCommercialSerializer(serializers.ModelSerializer):
 
 class SiteRoleRequirementSerializer(serializers.ModelSerializer):
     """Read serializer."""
+    department_name = serializers.CharField(source='department.name', read_only=True, default=None)
+    department_code = serializers.CharField(source='department.code', read_only=True, default=None)
+    site_name = serializers.CharField(source='site.name', read_only=True, default=None)
+    job_role_name = serializers.CharField(source='job_role.name', read_only=True, default=None)
+    job_role_code = serializers.CharField(source='job_role.code', read_only=True, default=None)
+    wage_category_name = serializers.CharField(source='wage_category.name', read_only=True, default=None)
+    wage_category_code = serializers.CharField(source='wage_category.code', read_only=True, default=None)
+    location_area_name = serializers.CharField(source='site.location_area.name', read_only=True, default=None)
+
     class Meta:
         model = SiteRoleRequirement
         fields = [
-            'id', 'site', 'job_role', 'approved_headcount',
+            'id', 'site', 'site_name', 'department', 'department_name', 'department_code',
+            'job_role', 'job_role_name', 'job_role_code', 'approved_headcount',
             'billing_type', 'billing_rate', 'wage_min', 'wage_max',
-            'shift_hours', 'wage_category',
+            'shift_hours', 'wage_category', 'wage_category_name', 'wage_category_code',
+            'location_area_name',
             'effective_from', 'effective_to', 'is_active',
             'wage_rate',
             'wage_rate_monthly_snapshot', 'wage_rate_daily_snapshot',
@@ -120,6 +132,9 @@ class SiteRoleRequirementSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = [
+            'department_name', 'department_code', 'site_name',
+            'job_role_name', 'job_role_code',
+            'wage_category_name', 'wage_category_code', 'location_area_name',
             'wage_rate',
             'wage_rate_monthly_snapshot', 'wage_rate_daily_snapshot',
             'wage_rate_effective_from_snapshot', 'wage_rate_source_snapshot',
@@ -129,11 +144,16 @@ class SiteRoleRequirementSerializer(serializers.ModelSerializer):
 
 class SiteRoleRequirementWriteSerializer(serializers.ModelSerializer):
     """Write serializer with field-level validation."""
+    department = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model = SiteRoleRequirement
         fields = [
-            'site', 'job_role', 'approved_headcount',
+            'site', 'department', 'job_role', 'approved_headcount',
             'billing_type', 'billing_rate', 'wage_min', 'wage_max',
             'shift_hours', 'wage_category',
             'effective_from', 'effective_to', 'is_active',
@@ -149,6 +169,28 @@ class SiteRoleRequirementWriteSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         instance = self.instance
+
+        site = data.get('site', getattr(instance, 'site', None))
+        department = data.get('department', getattr(instance, 'department', None))
+
+        if department is not None and site is not None:
+            if department.org_id != site.org_id:
+                raise serializers.ValidationError(
+                    {'department': 'Department must belong to the same organization as the site.'}
+                )
+            # Department must be org-level, same-client, or same-site
+            if department.site_id is not None and department.site_id != site.pk:
+                raise serializers.ValidationError(
+                    {'department': 'Department is scoped to a different site.'}
+                )
+            if (
+                department.site_id is None
+                and department.client_id is not None
+                and department.client_id != site.client_id
+            ):
+                raise serializers.ValidationError(
+                    {'department': 'Department belongs to a different client.'}
+                )
 
         wage_min = data.get('wage_min', getattr(instance, 'wage_min', None))
         wage_max = data.get('wage_max', getattr(instance, 'wage_max', None))

@@ -24,6 +24,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 
@@ -78,6 +79,8 @@ class JobRoleTestBase(TestCase):
         # Roles
         cls.role_admin = _role(cls.org, 'admin')
         cls.role_hr = _role(cls.org, 'hr_executive')
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_hr)
 
         # Users
         cls.superuser = _user('jr_super', is_superuser=True)

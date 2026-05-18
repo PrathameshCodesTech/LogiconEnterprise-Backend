@@ -225,11 +225,13 @@ class SiteCommercialViewSet(ScopedReadOnlyModelViewSet):
 class SiteRoleRequirementViewSet(ScopedModelViewSet):
     queryset = SiteRoleRequirement.objects.select_related(
         'site', 'site__scope_node', 'site__client__scope_node',
+        'site__location_area',
+        'department',
         'job_role', 'wage_category',
     ).order_by('site', 'job_role')
     permission_classes = [IsAuthenticated, HasCapability]
     scope_filter = filter_site_role_requirements_for_user
-    filterset_fields = ['site', 'job_role', 'billing_type', 'is_active']
+    filterset_fields = ['site', 'department', 'job_role', 'billing_type', 'is_active']
     search_fields = ['site__name', 'job_role__name']
 
     action_required_capabilities = {

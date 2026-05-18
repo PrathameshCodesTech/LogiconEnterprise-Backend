@@ -24,6 +24,8 @@ Scenarios:
   15. org-level SAC with site-level dept -> invalid
 """
 
+from datetime import date
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -31,8 +33,10 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
 from apps.core.models import Organization, ScopeNode, Department
-from apps.mrf.models import ManpowerRequest
-from apps.sites.models import Client, SiteProfile
+from apps.jobs.models import JobRole
+from apps.mrf.models import ManpowerRequest, MRFLineItem
+from apps.sites.models import Client, SiteProfile, SiteRoleRequirement
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.workflow.exceptions import WorkflowConfigurationError
 from apps.workflow.models import (
     WorkflowTemplate, WorkflowStepTemplate,
@@ -163,6 +167,8 @@ class B2TestBase(TestCase):
         cls.role_client_admin = _role(cls.org, 'client_admin')
         cls.role_workflow_admin = _role(cls.org, 'workflow_admin')
         cls.role_admin = _role(cls.org, 'admin')
+        bootstrap_role_permissions(cls.role_client_admin)
+        bootstrap_role_permissions(cls.role_admin)
 
         # Users scoped to client_a
         cls.user_a = _user('b2_user_a', org=cls.org, department=cls.dept_org)
@@ -207,8 +213,20 @@ class TestScopeFiltering(B2TestBase):
     def setUpTestData(cls):
         super().setUpTestData()
 
-        # MRF on site_a (client-a)
+        # MRF on site_a (client-a) — must have a billable line item for readiness gate
         cls.mrf_a = _mrf(cls.org, cls.site_a, cls.org_admin)
+        cls.job_role = JobRole.objects.create(
+            org=cls.org, name='B2 Guard', code='b2-guard', skill_category='unskilled',
+        )
+        cls.srr_a = SiteRoleRequirement.objects.create(
+            site=cls.site_a, job_role=cls.job_role,
+            approved_headcount=20, billing_type='billable',
+            effective_from=date.today(), is_active=True,
+        )
+        MRFLineItem.objects.create(
+            mrf=cls.mrf_a, job_role=cls.job_role,
+            site_role_requirement=cls.srr_a, headcount=2,
+        )
 
         # SAC for step so workflow can be started
         cls.wf_user = _user('b2_wf_user', org=cls.org, department=cls.dept_org)

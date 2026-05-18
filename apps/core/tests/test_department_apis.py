@@ -23,6 +23,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode, Department
 from apps.sites.models import Client, SiteProfile
@@ -97,6 +98,9 @@ class DeptTestBase(TestCase):
         cls.role_hr_admin = _role(cls.org, 'hr_admin')
         cls.role_hr_exec = _role(cls.org, 'hr_executive')
         cls.role_client_user = _role(cls.org, 'client_user')
+        bootstrap_role_permissions(cls.role_hr_admin)
+        bootstrap_role_permissions(cls.role_hr_exec)
+        bootstrap_role_permissions(cls.role_client_user)
 
         # users
         cls.superuser = _user('dept_superuser', is_superuser=True)
@@ -401,6 +405,7 @@ class TestUserDepartmentIntegration(DeptTestBase):
         cls.role_admin = AccessRole.objects.get_or_create(
             org=cls.org, code='admin', defaults={'name': 'admin'}
         )[0]
+        bootstrap_role_permissions(cls.role_admin)
         cls.admin_user = _user('dept_int_admin', org=cls.org)
         _assign(cls.admin_user, cls.role_admin, cls.n_company)
 
@@ -411,6 +416,7 @@ class TestUserDepartmentIntegration(DeptTestBase):
         cls.role_admin2 = AccessRole.objects.get_or_create(
             org=cls.org2, code='admin', defaults={'name': 'admin'}
         )[0]
+        bootstrap_role_permissions(cls.role_admin2)
         cls.dept_org2 = _dept(cls.org2, 'Org2 HR', 'org2-hr')
 
     def _user_url(self, pk=None):

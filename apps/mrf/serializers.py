@@ -12,15 +12,51 @@ from datetime import date
 
 from rest_framework import serializers
 
+from apps.budgets.services import validate_budget_plan_for_context
 from apps.core.models import Department
 
-from .models import ManpowerRequest, MRFLineItem
+from .models import ManpowerRequest, MRFLineItem, MRFSupportRequirement
 
 
 # ─── MRF Line Item ────────────────────────────────────────────────────────────
 
 class MRFLineItemSerializer(serializers.ModelSerializer):
     """Read serializer — all fields read-only."""
+
+    budget_plan_name = serializers.CharField(source='budget_plan.name', read_only=True, default=None)
+    budget_plan_code = serializers.CharField(source='budget_plan.code', read_only=True, default=None)
+    budget_plan_amount = serializers.DecimalField(
+        source='budget_plan.amount', max_digits=14, decimal_places=2, read_only=True, default=None,
+    )
+    budget_plan_currency = serializers.CharField(source='budget_plan.currency', read_only=True, default=None)
+    budget_plan_status = serializers.CharField(source='budget_plan.status', read_only=True, default=None)
+    budget_plan_nature = serializers.CharField(source='budget_plan.budget_nature', read_only=True, default=None)
+
+    # SRR display/snapshot fields
+    site_role_requirement_label = serializers.SerializerMethodField()
+    srr_department_name = serializers.CharField(
+        source='site_role_requirement.department.name', read_only=True, default=None,
+    )
+    srr_approved_headcount = serializers.IntegerField(
+        source='site_role_requirement.approved_headcount', read_only=True, default=None,
+    )
+    srr_remaining_headcount = serializers.SerializerMethodField()
+    srr_wage_min = serializers.DecimalField(
+        source='site_role_requirement.wage_min', max_digits=10, decimal_places=2,
+        read_only=True, default=None,
+    )
+    srr_wage_max = serializers.DecimalField(
+        source='site_role_requirement.wage_max', max_digits=10, decimal_places=2,
+        read_only=True, default=None,
+    )
+    srr_billing_rate = serializers.DecimalField(
+        source='site_role_requirement.billing_rate', max_digits=12, decimal_places=2,
+        read_only=True, default=None,
+    )
+    srr_shift_hours = serializers.DecimalField(
+        source='site_role_requirement.shift_hours', max_digits=4, decimal_places=1,
+        read_only=True, default=None,
+    )
 
     class Meta:
         model = MRFLineItem
@@ -29,8 +65,31 @@ class MRFLineItemSerializer(serializers.ModelSerializer):
             'replacement_for_employee', 'required_skills', 'wage_category',
             'min_wage_snapshot', 'wage_min_requested', 'wage_max_requested',
             'billing_rate_snapshot', 'budget_min', 'budget_max',
+            'budget_plan', 'budget_plan_name', 'budget_plan_code',
+            'budget_plan_amount', 'budget_plan_currency', 'budget_plan_status', 'budget_plan_nature',
+            'site_role_requirement_label', 'srr_department_name',
+            'srr_approved_headcount', 'srr_remaining_headcount',
+            'srr_wage_min', 'srr_wage_max', 'srr_billing_rate', 'srr_shift_hours',
         ]
         read_only_fields = fields
+
+    def get_site_role_requirement_label(self, obj):
+        if obj.site_role_requirement_id is None:
+            return None
+        srr = obj.site_role_requirement
+        parts = [str(srr.job_role)]
+        if srr.department_id:
+            parts.append(srr.department.name)
+        parts.append(f'×{srr.approved_headcount}')
+        return ' — '.join(parts)
+
+    def get_srr_remaining_headcount(self, obj):
+        if obj.site_role_requirement_id is None:
+            return None
+        from apps.mrf.services import get_billable_headcount_usage
+        srr = obj.site_role_requirement
+        already = get_billable_headcount_usage(srr.site, obj.job_role, exclude_mrf=obj.mrf)
+        return max(0, srr.approved_headcount - already)
 
 
 class MRFLineItemWriteSerializer(serializers.ModelSerializer):
@@ -43,7 +102,11 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
             'replacement_for_employee', 'required_skills', 'wage_category',
             'wage_min_requested', 'wage_max_requested',
             'billing_rate_snapshot', 'budget_min', 'budget_max',
+            'budget_plan',
         ]
+        extra_kwargs = {
+            'budget_plan': {'required': False, 'allow_null': True},
+        }
 
     def validate_headcount(self, value):
         if value < 1:
@@ -57,13 +120,44 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
         mrf = data.get('mrf') or (instance.mrf if instance else None)
         srr = data.get('site_role_requirement', instance.site_role_requirement if instance else None)
 
-        # site_role_requirement.site must match MRF.site
-        if mrf and srr and srr.site_id != mrf.site_id:
-            raise serializers.ValidationError({
-                'site_role_requirement': (
-                    'SiteRoleRequirement must belong to the same site as the MRF.'
-                )
-            })
+        if mrf and srr:
+            # site_role_requirement.site must match MRF.site
+            if srr.site_id != mrf.site_id:
+                raise serializers.ValidationError({
+                    'site_role_requirement': (
+                        'SiteRoleRequirement must belong to the same site as the MRF.'
+                    )
+                })
+
+            # job_role must match srr.job_role
+            job_role = data.get('job_role', instance.job_role if instance else None)
+            if job_role is not None and job_role.pk != srr.job_role_id:
+                raise serializers.ValidationError({
+                    'job_role': (
+                        f'job_role must match the SiteRoleRequirement job role '
+                        f'("{srr.job_role}").'
+                    )
+                })
+
+            # wage_category must match srr.wage_category when SRR has one
+            if srr.wage_category_id is not None:
+                wage_category = data.get('wage_category', instance.wage_category if instance else None)
+                if wage_category is not None and wage_category.pk != srr.wage_category_id:
+                    raise serializers.ValidationError({
+                        'wage_category': (
+                            f'wage_category must match the SiteRoleRequirement wage category '
+                            f'("{srr.wage_category}").'
+                        )
+                    })
+
+            # SRR department must match MRF required_department when both are set
+            if srr.department_id is not None and mrf.required_department_id is not None:
+                if srr.department_id != mrf.required_department_id:
+                    raise serializers.ValidationError({
+                        'site_role_requirement': (
+                            'SiteRoleRequirement department does not match the MRF required department.'
+                        )
+                    })
 
         # wage range
         wage_min = data.get('wage_min_requested', instance.wage_min_requested if instance else None)
@@ -81,7 +175,67 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
                 'budget_min': 'budget_min cannot exceed budget_max.'
             })
 
+        # budget_plan validation
+        # Explicit null → clearing; skip validation
+        if not ('budget_plan' in data and data['budget_plan'] is None):
+            budget_plan = data.get('budget_plan') or (
+                instance.budget_plan if instance and instance.budget_plan_id else None
+            )
+            if budget_plan is not None and mrf is not None:
+                billing_type = mrf.billing_type
+                dept_ids = [
+                    d for d in [mrf.requesting_department_id, mrf.required_department_id] if d
+                ]
+                li_errors = validate_budget_plan_for_context(
+                    budget_plan,
+                    org=mrf.org,
+                    billing_type=billing_type,
+                    site=mrf.site if billing_type == 'billable' else None,
+                    department_ids=dept_ids if billing_type == 'non_billable' else None,
+                )
+                if li_errors:
+                    raise serializers.ValidationError(li_errors)
+
         return data
+
+
+# ─── MRF Support Requirement ──────────────────────────────────────────────────
+
+_SUPPORT_FIELDS = [
+    'id',
+    'laptop_required', 'desktop_required', 'mail_id_required',
+    'hrms_login_required', 'outlook_required', 'ms_office_required',
+    'windows_required', 'own_or_rental',
+    'sim_card_required', 'data_card_required', 'uniform_required',
+    'visiting_cards_required', 'seating_required',
+    'admin_location', 'admin_other',
+    'created_at', 'updated_at',
+]
+
+
+class MRFSupportRequirementSerializer(serializers.ModelSerializer):
+    """Read serializer — nested inside ManpowerRequestSerializer."""
+
+    class Meta:
+        model = MRFSupportRequirement
+        fields = _SUPPORT_FIELDS
+        read_only_fields = _SUPPORT_FIELDS
+
+
+class MRFSupportRequirementWriteSerializer(serializers.ModelSerializer):
+    """Write serializer — used both nested (create/update) and standalone."""
+
+    class Meta:
+        model = MRFSupportRequirement
+        fields = [f for f in _SUPPORT_FIELDS if f not in ('id', 'created_at', 'updated_at')]
+        extra_kwargs = {f: {'required': False} for f in [
+            'laptop_required', 'desktop_required', 'mail_id_required',
+            'hrms_login_required', 'outlook_required', 'ms_office_required',
+            'windows_required', 'own_or_rental',
+            'sim_card_required', 'data_card_required', 'uniform_required',
+            'visiting_cards_required', 'seating_required',
+            'admin_location', 'admin_other',
+        ]}
 
 
 # ─── Manpower Request ─────────────────────────────────────────────────────────
@@ -89,6 +243,7 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
 class ManpowerRequestSerializer(serializers.ModelSerializer):
     """Read serializer — used for all responses (list, retrieve, create, update)."""
     line_items = MRFLineItemSerializer(many=True, read_only=True)
+    support_requirement = MRFSupportRequirementSerializer(read_only=True)
     requesting_department_name = serializers.CharField(
         source='requesting_department.name', read_only=True, default=None,
     )
@@ -101,6 +256,33 @@ class ManpowerRequestSerializer(serializers.ModelSerializer):
     required_department_code = serializers.CharField(
         source='required_department.code', read_only=True, default=None,
     )
+
+    # Budget display fields
+    budget_plan_name = serializers.CharField(source='budget_plan.name', read_only=True, default=None)
+    budget_plan_code = serializers.CharField(source='budget_plan.code', read_only=True, default=None)
+    budget_plan_amount = serializers.DecimalField(
+        source='budget_plan.amount', max_digits=14, decimal_places=2, read_only=True, default=None,
+    )
+    budget_plan_currency = serializers.CharField(source='budget_plan.currency', read_only=True, default=None)
+    budget_plan_status = serializers.CharField(source='budget_plan.status', read_only=True, default=None)
+    budget_plan_nature = serializers.CharField(source='budget_plan.budget_nature', read_only=True, default=None)
+
+    # ── Budget reservation state (read-only, computed) ───────────────────────
+    budget_reserved_amount = serializers.SerializerMethodField()
+    budget_committed_amount = serializers.SerializerMethodField()
+    budget_reservation_status = serializers.SerializerMethodField()
+
+    # ── Resolved budget context (auto-resolved or explicit budget plan) ───────
+    resolved_budget_plan_id = serializers.SerializerMethodField()
+    resolved_budget_plan_name = serializers.SerializerMethodField()
+    resolved_budget_plan_code = serializers.SerializerMethodField()
+    resolved_budget_scope = serializers.SerializerMethodField()
+    resolved_budget_total_amount = serializers.SerializerMethodField()
+    resolved_budget_reserved_amount = serializers.SerializerMethodField()
+    resolved_budget_committed_amount = serializers.SerializerMethodField()
+    resolved_budget_available_amount = serializers.SerializerMethodField()
+    requested_budget_amount = serializers.SerializerMethodField()
+    budget_after_request_available_amount = serializers.SerializerMethodField()
 
     # ── Workflow state (read-only, computed) ─────────────────────────────────
     workflow_status = serializers.SerializerMethodField()
@@ -121,8 +303,22 @@ class ManpowerRequestSerializer(serializers.ModelSerializer):
             'required_department', 'required_department_name', 'required_department_code',
             'department', 'billing_type',
             'required_by_date', 'reason', 'client_visible',
+            'request_number',
+            'experience_min_years', 'experience_max_years',
+            'reporting_to', 'mis_requirement',
+            'education_requirement', 'gender_preference', 'special_requirement',
+            'salary_range_text', 'ctc_budget_text',
+            'reference_note', 'other_remarks',
+            'budget_plan', 'budget_plan_name', 'budget_plan_code',
+            'budget_plan_amount', 'budget_plan_currency', 'budget_plan_status', 'budget_plan_nature',
             'submitted_at', 'approved_at', 'rejected_at',
-            'line_items', 'created_at', 'updated_at',
+            'budget_reserved_amount', 'budget_committed_amount', 'budget_reservation_status',
+            'resolved_budget_plan_id', 'resolved_budget_plan_name', 'resolved_budget_plan_code',
+            'resolved_budget_scope',
+            'resolved_budget_total_amount', 'resolved_budget_reserved_amount',
+            'resolved_budget_committed_amount', 'resolved_budget_available_amount',
+            'requested_budget_amount', 'budget_after_request_available_amount',
+            'line_items', 'support_requirement', 'created_at', 'updated_at',
             'workflow_status', 'workflow_instance_id',
             'workflow_current_step_id', 'workflow_current_step_code', 'workflow_current_step_name',
             'workflow_current_assigned_user', 'workflow_current_assigned_user_name',
@@ -186,6 +382,65 @@ class ManpowerRequestSerializer(serializers.ModelSerializer):
         step = self._get_current_step(obj)
         return step.assigned_department_name_snapshot if step else None
 
+    def get_budget_reserved_amount(self, obj):
+        from decimal import Decimal
+        from django.db.models import Sum
+        from apps.budgets.models import BudgetReservation
+        result = BudgetReservation.objects.filter(
+            mrf=obj, status='reserved',
+        ).aggregate(total=Sum('amount'))['total']
+        val = result or Decimal('0.00')
+        return str(val.quantize(Decimal('0.01')))
+
+    def get_budget_committed_amount(self, obj):
+        from decimal import Decimal
+        from django.db.models import Sum
+        from apps.budgets.models import BudgetReservation
+        result = BudgetReservation.objects.filter(
+            mrf=obj, status='committed',
+        ).aggregate(total=Sum('amount'))['total']
+        val = result or Decimal('0.00')
+        return str(val.quantize(Decimal('0.01')))
+
+    def get_budget_reservation_status(self, obj):
+        from apps.budgets.models import BudgetReservation
+        res = BudgetReservation.objects.filter(mrf=obj).order_by('-created_at').first()
+        return res.status if res else None
+
+    def _resolved(self, obj):
+        from apps.mrf.services import get_resolved_budget_context
+        return get_resolved_budget_context(obj)
+
+    def get_resolved_budget_plan_id(self, obj):
+        return self._resolved(obj)['resolved_budget_plan_id']
+
+    def get_resolved_budget_plan_name(self, obj):
+        return self._resolved(obj)['resolved_budget_plan_name']
+
+    def get_resolved_budget_plan_code(self, obj):
+        return self._resolved(obj)['resolved_budget_plan_code']
+
+    def get_resolved_budget_scope(self, obj):
+        return self._resolved(obj)['resolved_budget_scope']
+
+    def get_resolved_budget_total_amount(self, obj):
+        return self._resolved(obj)['resolved_budget_total_amount']
+
+    def get_resolved_budget_reserved_amount(self, obj):
+        return self._resolved(obj)['resolved_budget_reserved_amount']
+
+    def get_resolved_budget_committed_amount(self, obj):
+        return self._resolved(obj)['resolved_budget_committed_amount']
+
+    def get_resolved_budget_available_amount(self, obj):
+        return self._resolved(obj)['resolved_budget_available_amount']
+
+    def get_requested_budget_amount(self, obj):
+        return self._resolved(obj)['requested_budget_amount']
+
+    def get_budget_after_request_available_amount(self, obj):
+        return self._resolved(obj)['budget_after_request_available_amount']
+
 
 class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
     """
@@ -193,6 +448,7 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
 
     org and requested_by are injected by the view from the actor context.
     submitted_at / approved_at / rejected_at are managed by workflow transitions (deferred).
+    support_requirement is optional nested object; create/update handled in create()/update().
     """
 
     requesting_department = serializers.PrimaryKeyRelatedField(
@@ -205,6 +461,9 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    support_requirement = MRFSupportRequirementWriteSerializer(
+        required=False, allow_null=True,
+    )
 
     class Meta:
         model = ManpowerRequest
@@ -212,7 +471,30 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             'site', 'requested_by_type', 'mrf_type', 'billing_type',
             'requesting_department', 'required_department', 'department',
             'required_by_date', 'reason', 'client_visible', 'status',
+            'budget_plan',
+            'request_number',
+            'experience_min_years', 'experience_max_years',
+            'reporting_to', 'mis_requirement',
+            'education_requirement', 'gender_preference', 'special_requirement',
+            'salary_range_text', 'ctc_budget_text',
+            'reference_note', 'other_remarks',
+            'support_requirement',
         ]
+        extra_kwargs = {
+            'budget_plan': {'required': False, 'allow_null': True},
+            'request_number': {'required': False},
+            'experience_min_years': {'required': False, 'allow_null': True},
+            'experience_max_years': {'required': False, 'allow_null': True},
+            'reporting_to': {'required': False},
+            'mis_requirement': {'required': False},
+            'education_requirement': {'required': False},
+            'gender_preference': {'required': False},
+            'special_requirement': {'required': False},
+            'salary_range_text': {'required': False},
+            'ctc_budget_text': {'required': False},
+            'reference_note': {'required': False},
+            'other_remarks': {'required': False},
+        }
 
     def validate_required_by_date(self, value):
         if value and value < date.today():
@@ -243,6 +525,43 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
         )
 
         errors = {}
+
+        # ── Experience range validation ───────────────────────────────────────
+        exp_min = data.get(
+            'experience_min_years',
+            instance.experience_min_years if instance else None,
+        )
+        exp_max = data.get(
+            'experience_max_years',
+            instance.experience_max_years if instance else None,
+        )
+        if exp_min is not None and exp_min < 0:
+            errors['experience_min_years'] = 'Experience cannot be negative.'
+        if exp_max is not None and exp_max < 0:
+            errors['experience_max_years'] = 'Experience cannot be negative.'
+        if exp_min is not None and exp_max is not None and exp_min > exp_max:
+            errors['experience_min_years'] = (
+                'experience_min_years cannot exceed experience_max_years.'
+            )
+
+        # ── request_number uniqueness (belt-and-suspenders over DB constraint) ─
+        request_number = data.get(
+            'request_number',
+            instance.request_number if instance else '',
+        )
+        if request_number:
+            org = site.org if site else (instance.org if instance else None)
+            if org:
+                qs = ManpowerRequest.objects.filter(
+                    org=org, request_number=request_number,
+                )
+                if instance:
+                    qs = qs.exclude(pk=instance.pk)
+                if qs.exists():
+                    errors['request_number'] = (
+                        'An MRF with this request number already exists in this organization.'
+                    )
+
         if site is not None:
             self._validate_department_for_site(
                 requesting_department,
@@ -257,9 +576,46 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
                 errors,
             )
 
+        # budget_plan validation
+        # Explicit null → clearing; skip validation
+        if not ('budget_plan' in data and data['budget_plan'] is None):
+            budget_plan = data.get('budget_plan') or (
+                instance.budget_plan if instance and instance.budget_plan_id else None
+            )
+            if budget_plan is not None and site is not None:
+                billing_type = data.get('billing_type') or (instance.billing_type if instance else None)
+                if billing_type:
+                    dept_ids = [
+                        d.pk for d in [requesting_department, required_department] if d
+                    ]
+                    errors.update(validate_budget_plan_for_context(
+                        budget_plan,
+                        org=site.org,
+                        billing_type=billing_type,
+                        site=site if billing_type == 'billable' else None,
+                        department_ids=dept_ids if billing_type == 'non_billable' else None,
+                    ))
+
         if errors:
             raise serializers.ValidationError(errors)
         return data
+
+    def create(self, validated_data):
+        support_data = validated_data.pop('support_requirement', None)
+        instance = super().create(validated_data)
+        if support_data is not None:
+            MRFSupportRequirement.objects.create(mrf=instance, **support_data)
+        return instance
+
+    def update(self, instance, validated_data):
+        support_data = validated_data.pop('support_requirement', None)
+        instance = super().update(instance, validated_data)
+        if support_data is not None:
+            MRFSupportRequirement.objects.update_or_create(
+                mrf=instance,
+                defaults=support_data,
+            )
+        return instance
 
     @staticmethod
     def _validate_department_for_site(department, site, field_name, errors):

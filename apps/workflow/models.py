@@ -366,6 +366,308 @@ class StepAssignmentConfig(TimeStampedModel):
         return f"{self.trigger_type}/{self.step_code} → {self.assignment_mode} @ {scope}"
 
 
+# ─── Approval Routes ─────────────────────────────────────────────────────────
+
+class ApprovalRoute(TimeStampedModel):
+    """
+    A named business route that users select before sending for approval.
+    Points to a WorkflowTemplate and carries a set of step assignments.
+
+    Scope levels:
+      org route:    client=null, site=null
+      client route: client set, site=null
+      site route:   site set
+    """
+    org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='approval_routes',
+    )
+    name = models.CharField(max_length=255)
+    code = models.CharField(max_length=64)
+    trigger_type = models.CharField(max_length=32, choices=TRIGGER_TYPE_CHOICES)
+    template = models.ForeignKey(
+        WorkflowTemplate, on_delete=models.PROTECT, related_name='approval_routes',
+    )
+    client = models.ForeignKey(
+        'sites.Client', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='approval_routes',
+    )
+    site = models.ForeignKey(
+        'sites.SiteProfile', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='approval_routes',
+    )
+    description = models.TextField(blank=True)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = 'Approval Route'
+        verbose_name_plural = 'Approval Routes'
+        ordering = ['org', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['org', 'code'],
+                name='unique_ar_org_code',
+            ),
+            # Only one active default per org+trigger_type+site scope
+            models.UniqueConstraint(
+                fields=['org', 'trigger_type', 'site'],
+                condition=models.Q(site__isnull=False, is_default=True, is_active=True),
+                name='unique_ar_default_site',
+            ),
+            # Only one active default per org+trigger_type+client scope (no site)
+            models.UniqueConstraint(
+                fields=['org', 'trigger_type', 'client'],
+                condition=models.Q(
+                    client__isnull=False, site__isnull=True, is_default=True, is_active=True,
+                ),
+                name='unique_ar_default_client',
+            ),
+            # Only one active default per org+trigger_type at org level
+            models.UniqueConstraint(
+                fields=['org', 'trigger_type'],
+                condition=models.Q(
+                    client__isnull=True, site__isnull=True, is_default=True, is_active=True,
+                ),
+                name='unique_ar_default_org',
+            ),
+        ]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        errors = {}
+
+        if self.template_id and self.org_id:
+            tpl = (
+                WorkflowTemplate.objects
+                .filter(pk=self.template_id)
+                .values('org_id', 'trigger_type')
+                .first()
+            )
+            if tpl:
+                if tpl['org_id'] is not None and tpl['org_id'] != self.org_id:
+                    errors['template'] = (
+                        'Template must belong to the same organization as the route.'
+                    )
+                if tpl['trigger_type'] != self.trigger_type:
+                    errors['trigger_type'] = (
+                        f'Route trigger_type "{self.trigger_type}" does not match '
+                        f'template trigger_type "{tpl["trigger_type"]}".'
+                    )
+
+        if self.org_id:
+            from apps.sites.models import Client as ClientModel, SiteProfile as SiteModel
+
+            if self.client_id:
+                client_org_id = (
+                    ClientModel.objects
+                    .filter(pk=self.client_id)
+                    .values_list('org_id', flat=True)
+                    .first()
+                )
+                if client_org_id is not None and client_org_id != self.org_id:
+                    errors['client'] = 'Client must belong to the same organization as the route.'
+
+            if self.site_id:
+                site_data = (
+                    SiteModel.objects
+                    .filter(pk=self.site_id)
+                    .values('org_id', 'client_id')
+                    .first()
+                )
+                if site_data:
+                    if site_data['org_id'] != self.org_id:
+                        errors['site'] = 'Site must belong to the same organization as the route.'
+                    elif self.client_id and site_data['client_id'] != self.client_id:
+                        errors['site'] = 'Site must belong to the selected client.'
+
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self):
+        scope = self.site or self.client or f'org:{self.org_id}'
+        return f'{self.name} ({self.trigger_type}) @ {scope}'
+
+
+class ApprovalRouteStepAssignment(TimeStampedModel):
+    """
+    Defines who handles each template step when a workflow is started via an ApprovalRoute.
+    Phase 1: only named_user assignment mode is supported for active assignments.
+    """
+    route = models.ForeignKey(
+        ApprovalRoute, on_delete=models.CASCADE, related_name='step_assignments',
+    )
+    step_code = models.CharField(max_length=64)
+    department = models.ForeignKey(
+        'core.Department', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='approval_route_step_assignments',
+    )
+    assignment_mode = models.CharField(
+        max_length=16, choices=ASSIGNMENT_MODE_CHOICES, default='named_user',
+    )
+    named_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='approval_route_step_assignments',
+    )
+    note = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = 'Approval Route Step Assignment'
+        verbose_name_plural = 'Approval Route Step Assignments'
+        ordering = ['route', 'step_code']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['route', 'step_code'],
+                condition=models.Q(is_active=True),
+                name='unique_arsa_route_step',
+            ),
+        ]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        errors = {}
+
+        # step_code must exist in route.template steps
+        if self.route_id and self.step_code:
+            route_template_id = (
+                ApprovalRoute.objects
+                .filter(pk=self.route_id)
+                .values_list('template_id', flat=True)
+                .first()
+            )
+            if route_template_id is not None:
+                if not WorkflowStepTemplate.objects.filter(
+                    template_id=route_template_id, code=self.step_code,
+                ).exists():
+                    errors['step_code'] = (
+                        f'Step code "{self.step_code}" does not exist in the route\'s template.'
+                    )
+
+        # Named user required and valid for active named_user assignments
+        if self.is_active and self.assignment_mode == 'named_user':
+            if not self.named_user_id:
+                errors['named_user'] = (
+                    'A named user is required for named_user assignment mode.'
+                )
+            elif self.route_id:
+                route_org_id = (
+                    ApprovalRoute.objects
+                    .filter(pk=self.route_id)
+                    .values_list('org_id', flat=True)
+                    .first()
+                )
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                user_data = (
+                    User.objects
+                    .filter(pk=self.named_user_id)
+                    .values('is_active', 'org_id', 'username')
+                    .first()
+                )
+                if user_data:
+                    if not user_data['is_active']:
+                        errors['named_user'] = f'User "{user_data["username"]}" is inactive.'
+                    elif route_org_id and user_data['org_id'] != route_org_id:
+                        errors['named_user'] = (
+                            'User must belong to the same organization as the route.'
+                        )
+
+        # Department scope and user-department match validation
+        if self.department_id and self.route_id and 'department' not in errors:
+            from apps.core.models import Department
+            dept_data = (
+                Department.objects
+                .filter(pk=self.department_id)
+                .values('org_id', 'client_id', 'site_id', 'name')
+                .first()
+            )
+            route_data = (
+                ApprovalRoute.objects
+                .filter(pk=self.route_id)
+                .values('org_id', 'client_id', 'site_id')
+                .first()
+            )
+            if dept_data and route_data:
+                if dept_data['org_id'] != route_data['org_id']:
+                    errors['department'] = (
+                        'Department must belong to the same organization as the route.'
+                    )
+                else:
+                    dept_name = dept_data['name']
+                    dept_client_id = dept_data['client_id']
+                    dept_site_id = dept_data['site_id']
+                    route_site_id = route_data['site_id']
+                    route_client_id = route_data['client_id']
+
+                    if route_site_id:
+                        from apps.sites.models import SiteProfile
+                        site_client_id = (
+                            SiteProfile.objects
+                            .filter(pk=route_site_id)
+                            .values_list('client_id', flat=True)
+                            .first()
+                        )
+                        if dept_site_id is not None and dept_site_id != route_site_id:
+                            errors['department'] = (
+                                f'Department "{dept_name}" is scoped to a different site. '
+                                f'Site-level route requires org-level, same-client-level, '
+                                f'or same-site-level department.'
+                            )
+                        elif (dept_site_id is None and dept_client_id is not None
+                              and dept_client_id != site_client_id):
+                            errors['department'] = (
+                                f'Department "{dept_name}" belongs to a different client. '
+                                f'Site-level route requires org-level, same-client-level, '
+                                f'or same-site-level department.'
+                            )
+                    elif route_client_id:
+                        if dept_site_id is not None:
+                            errors['department'] = (
+                                f'Department "{dept_name}" is site-scoped. '
+                                f'Client-level route requires org-level or same-client department.'
+                            )
+                        elif dept_client_id is not None and dept_client_id != route_client_id:
+                            errors['department'] = (
+                                f'Department "{dept_name}" belongs to a different client. '
+                                f'Client-level route requires org-level or same-client department.'
+                            )
+                    else:
+                        if dept_client_id is not None or dept_site_id is not None:
+                            errors['department'] = (
+                                f'Department "{dept_name}" is not org-level. '
+                                f'Org-level route requires org-level department.'
+                            )
+
+        # named_user must belong to specified department
+        if (self.department_id and self.named_user_id
+                and 'department' not in errors and 'named_user' not in errors):
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            user_dept_id = (
+                User.objects
+                .filter(pk=self.named_user_id)
+                .values_list('department_id', flat=True)
+                .first()
+            )
+            if user_dept_id != self.department_id:
+                from apps.core.models import Department
+                dept_name = (
+                    Department.objects
+                    .filter(pk=self.department_id)
+                    .values_list('name', flat=True)
+                    .first()
+                ) or ''
+                errors['named_user'] = (
+                    f'User does not belong to department "{dept_name}".'
+                )
+
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self):
+        return f'{self.route.code}/{self.step_code} → {self.assignment_mode}'
+
+
 # ─── Runtime instances ────────────────────────────────────────────────────────
 
 class WorkflowInstance(TimeStampedModel):
@@ -402,6 +704,14 @@ class WorkflowInstance(TimeStampedModel):
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='initiated_workflows',
     )
     completed_at = models.DateTimeField(null=True, blank=True)
+
+    # Selected approval route (nullable for legacy workflows started before routes existed)
+    approval_route = models.ForeignKey(
+        ApprovalRoute, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='workflow_instances',
+    )
+    approval_route_name_snapshot = models.CharField(max_length=255, blank=True)
+    approval_route_code_snapshot = models.CharField(max_length=64, blank=True)
 
     class Meta:
         verbose_name = 'Workflow Instance'

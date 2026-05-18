@@ -8,6 +8,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.access.models import AccessRole, UserRoleAssignment, UserScopeAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.core.models import Organization, ScopeNode
@@ -67,6 +68,10 @@ class AssignmentTestBase(TestCase):
         _assign(cls.admin_user, cls.role_admin, cls.n_company)
         _assign(cls.hr_admin_user, cls.role_hr_admin, cls.n_company)
         # limited_user has no role → no capabilities
+
+        # DB permissions for runtime capability lookup
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_hr_admin)
 
     def setUp(self):
         self.api = APIClient()

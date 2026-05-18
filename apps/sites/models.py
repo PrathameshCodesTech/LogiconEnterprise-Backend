@@ -155,6 +155,12 @@ class SiteRoleRequirement(TimeStampedModel):
     ]
 
     site = models.ForeignKey(SiteProfile, on_delete=models.CASCADE, related_name='role_requirements')
+    department = models.ForeignKey(
+        'core.Department',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='site_role_requirements',
+    )
     job_role = models.ForeignKey(
         'jobs.JobRole',
         on_delete=models.CASCADE,
@@ -200,6 +206,7 @@ class SiteRoleRequirement(TimeStampedModel):
         ordering = ['site', 'job_role', '-effective_from']
         indexes = [
             models.Index(fields=['site', 'job_role', 'is_active']),
+            models.Index(fields=['site', 'department', 'job_role', 'is_active']),
             models.Index(fields=['billing_type']),
         ]
         constraints = [

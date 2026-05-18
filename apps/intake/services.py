@@ -312,6 +312,25 @@ def create_intake_submission(validated_data: dict, request=None) -> IntakeSubmis
     return submission
 
 
+def _link_resume_if_needed(doc: IntakeDocument, candidate) -> None:
+    """If doc is a resume document, ensure exactly one talent.Resume exists for it."""
+    if doc.document_type != 'resume':
+        return
+    from apps.talent.models import Resume
+    Resume.objects.get_or_create(
+        source_intake_document=doc,
+        defaults={
+            'candidate': candidate,
+            'file': doc.file,
+            'original_filename': doc.original_filename,
+            'content_type': doc.content_type,
+            'size_bytes': doc.size_bytes,
+            'source_type': 'qr_intake',
+            'status': 'uploaded',
+        },
+    )
+
+
 def create_intake_documents(submission: IntakeSubmission, files) -> list:
     validate_submission_documents(submission.campaign, submission.job_role, files)
     all_files = _iter_uploaded_files(files)
@@ -328,6 +347,7 @@ def create_intake_documents(submission: IntakeSubmission, files) -> list:
             content_type=getattr(f, 'content_type', ''),
             size_bytes=f.size,
         )
+        _link_resume_if_needed(doc, submission.candidate)
         documents.append(doc)
 
     return documents

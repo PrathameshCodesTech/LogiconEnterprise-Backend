@@ -26,6 +26,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.core.models import Organization, ScopeNode, Department
 from apps.mrf.models import ManpowerRequest
 from apps.sites.models import Client, SiteProfile
@@ -151,6 +152,8 @@ class WorkflowBTestBase(TestCase):
         # Roles
         cls.role_admin = _role(cls.org, 'admin')
         cls.role_hr_admin = _role(cls.org, 'hr_admin')
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_hr_admin)
 
         # Users — assigned to departments
         cls.hr_user = _user('wfb_hr_user', org=cls.org, department=cls.dept_hr)
@@ -327,7 +330,9 @@ class TestConfigCheckEndpoint(WorkflowBTestBase):
             org=org3, client=client3, name='S3', code='s3-wfb', scope_node=n3_site,
         )
         actor3 = _user('wfb_actor3', org=org3)
-        _assign(actor3, _role(org3, 'hr_admin'), n3)
+        role3 = _role(org3, 'hr_admin')
+        bootstrap_role_permissions(role3)
+        _assign(actor3, role3, n3)
 
         mrf = _mrf(org3, site3, actor3)
         self._login(actor3)

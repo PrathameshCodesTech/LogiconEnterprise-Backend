@@ -4,7 +4,7 @@ apps/workflow/views.py
 MRF + Client Onboarding workflow API views.
 """
 
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,6 +20,8 @@ from .serializers import (
     WorkflowStepInstanceSerializer,
     ActOnStepSerializer,
     ReassignStepSerializer,
+    WorkflowMyTaskSerializer,
+    serialize_my_workflow_task_detail,
 )
 
 
@@ -89,7 +91,189 @@ def _workflow_instance_qs_for_user(user):
     )
 
 
+def _my_tasks_steps_queryset(user, see_all_active_for_superuser):
+    """
+    Active steps on active workflows, limited to workflow instances the user can access.
+    Non-superusers (and superusers by default): only steps assigned to this user.
+    Superuser + see_all_active_for_superuser: all active steps (still scoped workflows for non-superuser path only).
+    """
+    from .models import WorkflowStepInstance
+
+    scoped_active_workflow_ids = (
+        _workflow_instance_qs_for_user(user)
+        .filter(status='active')
+        .values('id')
+    )
+    qs = (
+        WorkflowStepInstance.objects.filter(
+            status='active',
+            workflow__status='active',
+            workflow_id__in=scoped_active_workflow_ids,
+        )
+        .select_related(
+            'workflow',
+            'workflow__mrf',
+            'workflow__mrf__site',
+            'workflow__mrf__site__client',
+            'workflow__mrf__requesting_department',
+            'workflow__mrf__required_department',
+            'workflow__client_onboarding_request',
+            'workflow__client_onboarding_request__client',
+            'assigned_user',
+            'assigned_department',
+        )
+        .prefetch_related('workflow__mrf__line_items')
+        .order_by('-activated_at', 'workflow_id', 'step_order')
+    )
+    if user.is_superuser and see_all_active_for_superuser:
+        return qs
+    return qs.filter(assigned_user=user)
+
+
+def _my_task_detail_base_queryset(user):
+    """
+    Active steps on active workflows in scope; assignee must be user unless superuser.
+    Used for GET /api/workflow/my-tasks/{step_id}/.
+    """
+    from .models import WorkflowStepInstance, WorkflowAction
+    from apps.mrf.models import MRFLineItem
+    from apps.onboarding.models import (
+        ClientOnboardingProposedSite,
+        ClientOnboardingProposedDepartment,
+        ClientOnboardingProposedSiteRoleRequirement,
+        ClientOnboardingProposedBudget,
+        ClientOnboardingProposedUser,
+    )
+
+    scoped_active_wf = _workflow_instance_qs_for_user(user).filter(status='active')
+    qs = WorkflowStepInstance.objects.filter(
+        status='active',
+        workflow__status='active',
+        workflow_id__in=scoped_active_wf.values('id'),
+    )
+    if not user.is_superuser:
+        qs = qs.filter(assigned_user=user)
+
+    step_children = WorkflowStepInstance.objects.order_by('step_order').select_related(
+        'assigned_user', 'assigned_department', 'acted_by',
+    )
+    audit_children = WorkflowAction.objects.order_by('created_at').select_related('actor')
+    line_children = MRFLineItem.objects.order_by('pk').select_related(
+        'job_role', 'wage_category', 'budget_plan', 'site_role_requirement',
+    )
+    proposed_sites_children = ClientOnboardingProposedSite.objects.order_by('pk').select_related(
+        'location_area',
+    )
+    proposed_depts_children = ClientOnboardingProposedDepartment.objects.order_by('pk').select_related(
+        'proposed_site',
+    )
+    proposed_srr_children = ClientOnboardingProposedSiteRoleRequirement.objects.order_by('pk').select_related(
+        'proposed_site', 'proposed_department', 'job_role', 'wage_category',
+    )
+    proposed_budget_children = ClientOnboardingProposedBudget.objects.order_by('pk').select_related(
+        'proposed_site', 'proposed_department',
+    )
+    proposed_user_children = ClientOnboardingProposedUser.objects.order_by('pk').select_related(
+        'access_role', 'proposed_site',
+    )
+
+    return qs.select_related(
+        'workflow',
+        'workflow__template',
+        'workflow__initiated_by',
+        'workflow__mrf',
+        'workflow__mrf__site',
+        'workflow__mrf__site__client',
+        'workflow__mrf__requesting_department',
+        'workflow__mrf__required_department',
+        'workflow__mrf__requested_by',
+        'workflow__mrf__budget_plan',
+        'workflow__client_onboarding_request',
+        'workflow__client_onboarding_request__client',
+        'workflow__client_onboarding_request__requested_by',
+        'workflow__client_onboarding_request__budget_plan',
+        'workflow__client_onboarding_request__created_client',
+        'assigned_user',
+        'assigned_department',
+    ).prefetch_related(
+        Prefetch('workflow__steps', queryset=step_children),
+        Prefetch('workflow__audit_trail', queryset=audit_children),
+        Prefetch('workflow__mrf__line_items', queryset=line_children),
+        Prefetch(
+            'workflow__client_onboarding_request__proposed_sites',
+            queryset=proposed_sites_children,
+        ),
+        Prefetch(
+            'workflow__client_onboarding_request__proposed_departments',
+            queryset=proposed_depts_children,
+        ),
+        Prefetch(
+            'workflow__client_onboarding_request__proposed_role_requirements',
+            queryset=proposed_srr_children,
+        ),
+        Prefetch(
+            'workflow__client_onboarding_request__proposed_budgets',
+            queryset=proposed_budget_children,
+        ),
+        Prefetch(
+            'workflow__client_onboarding_request__proposed_users',
+            queryset=proposed_user_children,
+        ),
+    )
+
+
 # ─── MRF Workflow Views ───────────────────────────────────────────────────────
+
+class AvailableRoutesView(APIView):
+    """
+    GET /api/workflow/routes/available/?trigger_type=mrf&client=<id>&site=<id>
+    GET /api/workflow/routes/available/?trigger_type=client_onboarding&client=<id>
+
+    Returns preview of available ApprovalRoutes for the given scope.
+    """
+    permission_classes = [IsAuthenticated, HasAnyCapability]
+    required_capabilities = ['workflow.read', 'workflow.start_workflow']
+
+    def get(self, request):
+        from .models import ApprovalRoute
+        from .services import get_available_approval_routes, build_approval_route_preview
+
+        trigger_type = request.query_params.get('trigger_type', '')
+        if trigger_type not in ('mrf', 'client_onboarding'):
+            return Response(
+                {'detail': 'trigger_type must be "mrf" or "client_onboarding".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not hasattr(request.user, 'org') or request.user.org is None:
+            return Response({'count': 0, 'results': []})
+
+        org = request.user.org
+        client = None
+        site = None
+
+        client_id = request.query_params.get('client')
+        site_id = request.query_params.get('site')
+
+        if client_id:
+            from apps.sites.models import Client as ClientModel
+            try:
+                client = ClientModel.objects.get(pk=client_id, org=org)
+            except ClientModel.DoesNotExist:
+                return Response({'detail': 'Client not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if site_id:
+            from apps.sites.models import SiteProfile as SiteModel
+            try:
+                site = SiteModel.objects.get(pk=site_id, org=org)
+            except SiteModel.DoesNotExist:
+                return Response({'detail': 'Site not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        routes = get_available_approval_routes(trigger_type, org, client=client, site=site)
+        previews = [build_approval_route_preview(r) for r in routes]
+
+        return Response({'count': len(previews), 'results': previews})
+
 
 class StartMRFWorkflowView(APIView):
     """POST /api/workflow/mrf/{mrf_id}/start/"""
@@ -98,11 +282,31 @@ class StartMRFWorkflowView(APIView):
 
     def post(self, request, mrf_id):
         from .services import start_mrf_workflow
+        from .models import ApprovalRoute
+        from apps.mrf.services import check_mrf_readiness
 
         mrf = _get_mrf_or_404(request.user, mrf_id)
 
+        readiness = check_mrf_readiness(mrf)
+        if not readiness['ok']:
+            return Response(
+                {'detail': 'MRF is not ready for approval.', 'errors': readiness['errors']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        approval_route = None
+        route_id = request.data.get('approval_route')
+        if route_id is not None:
+            try:
+                approval_route = ApprovalRoute.objects.get(pk=route_id)
+            except ApprovalRoute.DoesNotExist:
+                return Response(
+                    {'detail': 'Approval route not found.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         try:
-            instance = start_mrf_workflow(mrf, actor=request.user)
+            instance = start_mrf_workflow(mrf, actor=request.user, approval_route=approval_route)
         except WorkflowConfigurationError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -217,12 +421,32 @@ class StartClientOnboardingWorkflowView(APIView):
 
     def post(self, request, onboarding_id):
         from .services import start_client_onboarding_workflow
+        from .models import ApprovalRoute
+        from apps.onboarding.services import check_onboarding_readiness
 
         onboarding_request = _get_onboarding_or_404(request.user, onboarding_id)
 
+        ok, errors, _ = check_onboarding_readiness(onboarding_request)
+        if not ok:
+            return Response(
+                {'detail': 'Onboarding setup is incomplete.', 'errors': errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        approval_route = None
+        route_id = request.data.get('approval_route')
+        if route_id is not None:
+            try:
+                approval_route = ApprovalRoute.objects.get(pk=route_id)
+            except ApprovalRoute.DoesNotExist:
+                return Response(
+                    {'detail': 'Approval route not found.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         try:
             instance = start_client_onboarding_workflow(
-                onboarding_request, actor=request.user,
+                onboarding_request, actor=request.user, approval_route=approval_route,
             )
         except WorkflowConfigurationError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -323,6 +547,39 @@ class ClientOnboardingWorkflowConfigCheckView(APIView):
 
 
 # ─── Shared step action views ─────────────────────────────────────────────────
+
+class MyWorkflowTasksView(APIView):
+    """
+    GET /api/workflow/my-tasks/
+
+    Read-only inbox: active steps assigned to the user on active workflows.
+    Authorization is queryset-based (see _my_tasks_steps_queryset).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        see_all = (
+            request.user.is_superuser
+            and str(request.query_params.get('all', '')).lower() == 'true'
+        )
+        qs = _my_tasks_steps_queryset(request.user, see_all_active_for_superuser=see_all)
+        ser = WorkflowMyTaskSerializer(qs, many=True)
+        data = ser.data
+        return Response({'count': len(data), 'results': data})
+
+
+class MyWorkflowTaskDetailView(APIView):
+    """
+    GET /api/workflow/my-tasks/{step_id}/
+
+    Drawer payload for an active assigned task (or any active step for superuser).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, step_id):
+        step = get_object_or_404(_my_task_detail_base_queryset(request.user), pk=step_id)
+        return Response(serialize_my_workflow_task_detail(step, request))
+
 
 class WorkflowInstanceDetailView(APIView):
     """GET /api/workflow/instances/{id}/"""

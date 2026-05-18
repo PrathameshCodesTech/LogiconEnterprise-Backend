@@ -10,6 +10,7 @@ Capability map:
 Approval workflow (mrf.approve / mrf.reject) is deferred to Phase 4F+.
 """
 
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -25,6 +26,8 @@ from .serializers import (
     ManpowerRequestWriteSerializer,
     MRFLineItemSerializer,
     MRFLineItemWriteSerializer,
+    MRFSupportRequirementSerializer,
+    MRFSupportRequirementWriteSerializer,
 )
 
 
@@ -41,8 +44,10 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
         'org', 'site', 'requested_by',
         'requesting_department', 'required_department',
         'site__scope_node', 'site__client__scope_node',
+        'budget_plan', 'support_requirement',
     ).prefetch_related(
         'line_items__job_role',
+        'line_items__budget_plan',
         'workflow_instances__steps__assigned_user',
     ).order_by('-created_at')
 
@@ -67,6 +72,7 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
         'update':         'mrf.update',
         'partial_update': 'mrf.update',
         'destroy':        'mrf.delete',
+        'readiness':      'mrf.read',
     }
 
     def get_serializer_class(self):
@@ -110,8 +116,17 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
-        out = ManpowerRequestSerializer(serializer.instance, context={'request': request})
+        # Re-fetch so nested writes (support_requirement) are visible in response.
+        fresh = self.get_queryset().get(pk=serializer.instance.pk)
+        out = ManpowerRequestSerializer(fresh, context={'request': request})
         return Response(out.data)
+
+    @action(detail=True, methods=['get'], url_path='readiness')
+    def readiness(self, request, pk=None):
+        from apps.mrf.services import check_mrf_readiness
+        mrf = self.get_object()
+        result = check_mrf_readiness(mrf)
+        return Response(result)
 
 
 # ─── MRFLineItem ViewSet ──────────────────────────────────────────────────────
@@ -126,6 +141,7 @@ class MRFLineItemViewSet(ScopedModelViewSet):
     queryset = MRFLineItem.objects.select_related(
         'mrf', 'job_role', 'site_role_requirement', 'wage_category',
         'mrf__site', 'mrf__site__scope_node', 'mrf__site__client__scope_node',
+        'budget_plan',
     ).order_by('mrf_id', 'id')
 
     permission_classes = [IsAuthenticated, HasCapability]
@@ -162,8 +178,14 @@ class MRFLineItemViewSet(ScopedModelViewSet):
         self._check_mrf_scope(mrf)
         srr = serializer.validated_data.get('site_role_requirement')
         extra = {}
-        if srr and serializer.validated_data.get('wage_min_requested') is None:
-            extra['min_wage_snapshot'] = srr.wage_min
+        if srr:
+            if serializer.validated_data.get('wage_min_requested') is None:
+                extra['min_wage_snapshot'] = srr.wage_min
+            if serializer.validated_data.get('billing_rate_snapshot') is None and srr.billing_rate is not None:
+                extra['billing_rate_snapshot'] = srr.billing_rate
+        # Auto-inherit MRF budget when not explicitly provided
+        if serializer.validated_data.get('budget_plan') is None and mrf.budget_plan_id:
+            extra['budget_plan'] = mrf.budget_plan
         serializer.save(**extra)
 
     def perform_update(self, serializer):

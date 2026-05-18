@@ -8,6 +8,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.core.models import Organization, ScopeNode
@@ -50,6 +51,9 @@ class UserWriteTestBase(TestCase):
         cls.role_admin = _role(cls.org, 'admin')
         cls.role_hr_admin = _role(cls.org, 'hr_admin')
         cls.role_client_user = _role(cls.org, 'client_user')
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_hr_admin)
+        bootstrap_role_permissions(cls.role_client_user)
 
         cls.superuser = _user('uw_superuser', is_superuser=True)
         cls.admin_user = _user('uw_admin', org=cls.org)

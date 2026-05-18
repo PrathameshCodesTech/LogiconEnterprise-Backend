@@ -28,7 +28,9 @@ class Command(BaseCommand):
         site = self._seed_site_profile(org, client, scope_nodes, location_areas)
         self._seed_site_role_requirements(site)
         self._seed_module_activations(scope_nodes)
-        self._seed_departments(org)
+        depts = self._seed_departments(org)
+        self._seed_budget_plans(org, client, depts)
+        self._seed_users(org, roles, scope_nodes)
 
         self.stdout.write(self.style.SUCCESS('\n[OK] Foundation seed complete.\n'))
 
@@ -127,37 +129,39 @@ class Command(BaseCommand):
 
     # ──────────────────────────────────────────────────────────────────────────
     def _seed_permissions(self):
-        from apps.access.models import Permission, PERMISSION_ACTION_CHOICES, PERMISSION_RESOURCE_CHOICES
-
-        actions = [a[0] for a in PERMISSION_ACTION_CHOICES]
-        resources = [r[0] for r in PERMISSION_RESOURCE_CHOICES]
-
-        key_resources = [
-            'organization', 'user', 'role', 'module', 'client', 'site',
-            'site_role_requirement', 'job_role', 'campaign', 'mrf',
-            'workflow', 'report', 'candidate', 'interview', 'deployment',
-            'wage', 'budget',
-        ]
-        key_actions = ['create', 'read', 'update', 'delete', 'approve', 'reject', 'manage', 'shortlist']
+        """
+        Create one Permission row per capability in ALL_CAPABILITIES, keyed by code.
+        For 2-part strings (resource.action) resource/action are populated directly.
+        For 3-part strings (workflow.config.read) resource = joined prefix with '_'.
+        """
+        from apps.access.models import Permission
+        from apps.access.capabilities import ALL_CAPABILITIES
 
         permissions = {}
         created_count = 0
         existed_count = 0
 
-        for resource in resources:
-            for action in actions:
-                if resource not in key_resources and action != 'read':
-                    continue
-                obj, created = Permission.objects.get_or_create(
-                    action=action,
-                    resource=resource,
-                    defaults={'description': f'Can {action} {resource}'},
-                )
-                permissions[f'{resource}.{action}'] = obj
-                if created:
-                    created_count += 1
-                else:
-                    existed_count += 1
+        for cap in ALL_CAPABILITIES:
+            parts = cap.split('.')
+            if len(parts) == 2:
+                resource, action = parts
+            else:
+                resource = '_'.join(parts[:-1])  # e.g. workflow_config
+                action = parts[-1]
+
+            obj, created = Permission.objects.get_or_create(
+                code=cap,
+                defaults={
+                    'resource': resource,
+                    'action': action,
+                    'description': f'Can {action} {cap}',
+                },
+            )
+            permissions[cap] = obj
+            if created:
+                created_count += 1
+            else:
+                existed_count += 1
 
         self.stdout.write(
             f'  [Permission] Created: {created_count}, Existed: {existed_count}'
@@ -171,16 +175,14 @@ class Command(BaseCommand):
 
         created_count = 0
         existed_count = 0
+        skipped_count = 0
 
         for role_code, role_obj in roles.items():
             caps = ROLE_CAPABILITIES.get(role_code, [])
             for cap in caps:
-                parts = cap.split('.')
-                if len(parts) != 2:
-                    continue
-                resource, action = parts[0], parts[1]
-                perm = permissions.get(f'{resource}.{action}')
+                perm = permissions.get(cap)
                 if not perm:
+                    skipped_count += 1
                     continue
                 _, created = AccessRolePermission.objects.get_or_create(
                     role=role_obj,
@@ -191,9 +193,10 @@ class Command(BaseCommand):
                 else:
                     existed_count += 1
 
-        self.stdout.write(
-            f'  [AccessRolePermission] Created: {created_count}, Existed: {existed_count}'
-        )
+        msg = f'  [AccessRolePermission] Created: {created_count}, Existed: {existed_count}'
+        if skipped_count:
+            msg += f', Skipped (no Permission row): {skipped_count}'
+        self.stdout.write(msg)
 
     # ──────────────────────────────────────────────────────────────────────────
     def _seed_job_roles(self, org):
@@ -528,6 +531,7 @@ class Command(BaseCommand):
             ('Support', 'support', 'IT and general support'),
         ]
 
+        depts = {}
         for name, code, description in dept_defs:
             obj, created = Department.objects.get_or_create(
                 org=org,
@@ -538,3 +542,129 @@ class Command(BaseCommand):
                 defaults={'name': name, 'description': description},
             )
             self.stdout.write(f'  [Department] {name} — {"CREATED" if created else "EXISTS"}')
+            depts[code] = obj
+        return depts
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _seed_budget_plans(self, org, client, depts):
+        from apps.budgets.models import BudgetPlan
+        import datetime
+
+        finance_dept = depts.get('finance')
+
+        plans = []
+
+        if client:
+            plans.append({
+                'code': 'logicon-billable-manpower-fy26',
+                'name': 'ABC Infra Mumbai Manpower Budget FY26',
+                'budget_nature': 'billable',
+                'budget_type': 'manpower',
+                'client': client,
+                'site': None,
+                'department': None,
+                'period_start': datetime.date(2025, 4, 1),
+                'period_end': datetime.date(2026, 3, 31),
+                'amount': '5000000.00',
+                'currency': 'INR',
+                'status': 'active',
+            })
+        else:
+            self.stdout.write('  [BudgetPlan] Billable sample skipped — demo client not found.')
+
+        if finance_dept:
+            plans.append({
+                'code': 'logicon-internal-hiring-fy26',
+                'name': 'Logicon HR Hiring Budget FY26',
+                'budget_nature': 'non_billable',
+                'budget_type': 'hiring',
+                'client': None,
+                'site': None,
+                'department': finance_dept,
+                'period_start': datetime.date(2025, 4, 1),
+                'period_end': datetime.date(2026, 3, 31),
+                'amount': '1000000.00',
+                'currency': 'INR',
+                'status': 'active',
+            })
+        else:
+            self.stdout.write('  [BudgetPlan] Non-billable sample skipped — finance dept not found.')
+
+        for plan in plans:
+            obj, created = BudgetPlan.objects.get_or_create(
+                org=org,
+                code=plan.pop('code'),
+                defaults={**plan, 'notes': ''},
+            )
+            self.stdout.write(f'  [BudgetPlan] {obj.name} — {"CREATED" if created else "EXISTS"}')
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _seed_users(self, org, roles, scope_nodes):
+        from apps.accounts.models import User
+        from apps.access.models import UserRoleAssignment
+
+        company_node = scope_nodes['company']
+        password = 'Password@123'
+
+        user_defs = [
+            {
+                'username': 'admin.logicon',
+                'email': 'admin@logicon.local',
+                'first_name': 'Admin',
+                'last_name': 'Logicon',
+                'user_type': 'internal',
+                'role_code': 'admin',
+            },
+            {
+                'username': 'hr.admin',
+                'email': 'hradmin@logicon.local',
+                'first_name': 'HR',
+                'last_name': 'Admin',
+                'user_type': 'internal',
+                'role_code': 'hr_admin',
+            },
+            {
+                'username': 'hr.executive',
+                'email': 'hrexec@logicon.local',
+                'first_name': 'HR',
+                'last_name': 'Executive',
+                'user_type': 'internal',
+                'role_code': 'hr_executive',
+            },
+            {
+                'username': 'finance.user',
+                'email': 'finance@logicon.local',
+                'first_name': 'Finance',
+                'last_name': 'User',
+                'user_type': 'internal',
+                'role_code': 'finance',
+            },
+            {
+                'username': 'sales.manager',
+                'email': 'salesmanager@logicon.local',
+                'first_name': 'Sales',
+                'last_name': 'Manager',
+                'user_type': 'internal',
+                'role_code': 'sales_manager',
+            },
+        ]
+
+        for defn in user_defs:
+            role_code = defn.pop('role_code')
+            role_obj = roles.get(role_code)
+            user, created = User.objects.get_or_create(
+                username=defn['username'],
+                defaults={**defn, 'org': org, 'is_active': True},
+            )
+            if created:
+                user.set_password(password)
+                user.save(update_fields=['password'])
+            if role_obj:
+                UserRoleAssignment.objects.get_or_create(
+                    user=user,
+                    role=role_obj,
+                    scope_node=company_node,
+                )
+            self.stdout.write(
+                f'  [User] {user.email} ({role_code}) — {"CREATED" if created else "EXISTS"}'
+            )

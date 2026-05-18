@@ -23,6 +23,7 @@ from apps.wages.models import LocationArea, WageCategory, MinimumWageRate
 from apps.wages.services import get_applicable_minimum_wage
 from apps.sites.models import Client, SiteProfile, SiteRoleRequirement
 from apps.access.capabilities import WAGE_READ, WAGE_CREATE, WAGE_UPDATE, WAGE_DELETE
+from apps.access.tests.utils import bootstrap_role_permissions
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,6 +41,7 @@ def make_user(org, role_code, scope_node, username=None):
         defaults={'name': role_code.replace('_', ' ').title()},
     )
     UserRoleAssignment.objects.get_or_create(user=user, role=role, scope_node=scope_node)
+    bootstrap_role_permissions(role)
     return user
 
 

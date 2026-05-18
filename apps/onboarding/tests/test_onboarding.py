@@ -39,14 +39,27 @@ Scenarios:
   20. Existing MRF workflow start still works after schema change.
 """
 
+import datetime
+
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
+import datetime
+
 from apps.accounts.models import User
+from apps.budgets.models import BudgetPlan
 from apps.core.models import Organization, ScopeNode, Department
-from apps.onboarding.models import ClientOnboardingRequest
+from apps.jobs.models import JobRole
+from apps.onboarding.models import (
+    ClientOnboardingRequest,
+    ClientOnboardingProposedSite,
+    ClientOnboardingProposedDepartment,
+    ClientOnboardingProposedSiteRoleRequirement,
+    ClientOnboardingProposedBudget,
+)
 from apps.sites.models import Client, SiteProfile
 from apps.workflow.exceptions import WorkflowConfigurationError
 from apps.workflow.models import (
@@ -94,7 +107,7 @@ def _dept(org, name, code):
     return Department.objects.create(org=org, name=name, code=code)
 
 
-def _onboarding(org, client, requested_by, onboarding_type='new_client'):
+def _onboarding(org, client, requested_by, onboarding_type='new_site_expansion'):
     return ClientOnboardingRequest.objects.create(
         org=org, client=client, requested_by=requested_by,
         onboarding_type=onboarding_type, status='draft',
@@ -176,6 +189,8 @@ class OBTestBase(TestCase):
         cls.role_admin = _role(cls.org, 'admin')
         cls.role_sales = _role(cls.org, 'sales_manager')
         cls.role_ops = _role(cls.org, 'operations')
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_sales)
 
         # Users
         cls.admin = _user('ob_admin', org=cls.org)
@@ -224,6 +239,10 @@ class OBTestBase(TestCase):
             org=cls.org, trigger_type='mrf', step_code='ob_mrf_hr',
             assignment_mode='named_user', named_user=cls.hr_worker,
             is_active=True,
+        )
+
+        cls.job_role = JobRole.objects.create(
+            org=cls.org, name='OB Guard', code='ob-guard', skill_category='unskilled',
         )
 
     def setUp(self):
@@ -277,7 +296,7 @@ class TestOnboardingCRUD(OBTestBase):
         resp = self.api.post(self._list_url(), {
             'org': self.org.pk,
             'client': self.client_a.pk,
-            'onboarding_type': 'new_client',
+            'onboarding_type': 'new_site_expansion',
             'summary': 'Test onboarding',
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
@@ -290,7 +309,7 @@ class TestOnboardingCRUD(OBTestBase):
         resp = self.api.post(self._list_url(), {
             'org': self.org2.pk,
             'client': self.client_a.pk,
-            'onboarding_type': 'new_client',
+            'onboarding_type': 'new_site_expansion',
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
         created = ClientOnboardingRequest.objects.get(pk=resp.data['id'])
@@ -300,7 +319,7 @@ class TestOnboardingCRUD(OBTestBase):
         self._login(self.cl_a_user)
         resp = self.api.post(self._list_url(), {
             'client': self.client_b.pk,
-            'onboarding_type': 'new_client',
+            'onboarding_type': 'new_site_expansion',
         }, format='json')
         self.assertEqual(resp.status_code, 403)
 
@@ -327,6 +346,7 @@ class TestOnboardingCRUD(OBTestBase):
         n_org2 = _node(self.org2, 'ob-org2', 'company', None, 0, 'ob-org2')
         org2_user = _user('ob_org2_user', org=self.org2)
         role2 = _role(self.org2, 'admin')  # 'admin' has all capabilities
+        bootstrap_role_permissions(role2)
         _assign(org2_user, role2, n_org2)
         self._login(org2_user)
         resp = self.api.get(self._list_url())
@@ -396,6 +416,28 @@ class TestOnboardingWorkflowStart(OBTestBase):
             client_onboarding_request=req,
         ).count(), 0)
 
+    def test_api_detail_exposes_workflow_summary_fields(self):
+        req = _onboarding(self.org, self.client_a, self.admin)
+        self._login(self.admin)
+
+        before = self.api.get(self._detail_url(req.pk))
+        self.assertEqual(before.status_code, 200, before.data)
+        self.assertEqual(before.data['workflow_status'], 'not_started')
+        self.assertIsNone(before.data['workflow_instance_id'])
+        self.assertIsNone(before.data['workflow_current_step_id'])
+
+        instance = start_client_onboarding_workflow(req, actor=self.admin)
+        active_step = instance.steps.get(status='active')
+        after = self.api.get(self._detail_url(req.pk))
+        self.assertEqual(after.status_code, 200, after.data)
+        self.assertEqual(after.data['workflow_status'], 'active')
+        self.assertEqual(after.data['workflow_instance_id'], instance.pk)
+        self.assertEqual(after.data['workflow_current_step_id'], active_step.pk)
+        self.assertEqual(after.data['workflow_current_step_code'], active_step.step_code)
+        self.assertEqual(after.data['workflow_current_step_name'], active_step.step_name)
+        self.assertEqual(after.data['workflow_current_assigned_user'], self.ops_worker.pk)
+        self.assertEqual(after.data['workflow_current_assigned_user_name'], self.ops_worker.username)
+
     def test_duplicate_start_raises(self):
         """Scenario 12: starting workflow twice raises WorkflowConfigurationError."""
         req = _onboarding(self.org, self.client_a, self.admin)
@@ -407,6 +449,28 @@ class TestOnboardingWorkflowStart(OBTestBase):
     def test_api_start_returns_201(self):
         """API start endpoint returns 201 with instance data."""
         req = _onboarding(self.org, self.client_a, self.admin)
+        # Add complete proposed setup so readiness check passes (new_site_expansion type).
+        ps = ClientOnboardingProposedSite.objects.create(
+            request=req, name='OB Site', code='ob-ps-start',
+            contact_person='Alice', contact_phone='9000000001', contact_email='a@ob.local',
+            is_active=True,
+        )
+        ClientOnboardingProposedDepartment.objects.create(
+            request=req, proposed_site=ps, name='OB Dept', code='ob-pd-start',
+            scope_level='site', is_active=True,
+        )
+        ClientOnboardingProposedSiteRoleRequirement.objects.create(
+            request=req, proposed_site=ps, job_role=self.job_role,
+            approved_headcount=5, billing_type='billable',
+            billing_rate='15000.00', wage_min='10000.00', wage_max='12000.00',
+            is_active=True,
+        )
+        ClientOnboardingProposedBudget.objects.create(
+            request=req, name='OB Budget', code='ob-pb-start',
+            budget_nature='billable', budget_type='onboarding', scope_level='client',
+            amount='500000.00', currency='INR',
+            period_start=datetime.date.today(), is_active=True,
+        )
         self._login(self.admin)
         resp = self.api.post(self._start_url(req.pk))
         self.assertEqual(resp.status_code, 201, resp.data)
@@ -445,6 +509,7 @@ class TestOnboardingConfigCheck(OBTestBase):
         cl3 = Client.objects.create(org=org3, name='CL3', code='ob3-cl', scope_node=n3c)
         actor3 = _user('ob_actor3', org=org3)
         role3 = _role(org3, 'admin')  # 'admin' has all capabilities
+        bootstrap_role_permissions(role3)
         _assign(actor3, role3, n3)
 
         req = ClientOnboardingRequest.objects.create(
@@ -467,6 +532,7 @@ class TestOnboardingConfigCheck(OBTestBase):
         cl4 = Client.objects.create(org=org4, name='CL4', code='ob4-cl', scope_node=n4c)
         actor4 = _user('ob_actor4', org=org4)
         role4 = _role(org4, 'admin')  # 'admin' maps to ALL_CAPABILITIES in ROLE_CAPABILITIES
+        bootstrap_role_permissions(role4)
         _assign(actor4, role4, n4)
 
         # Template with 2 steps; only 1 has an SAC
@@ -634,3 +700,180 @@ class TestMRFNonRegression(OBTestBase):
         )
         with self.assertRaises(ValidationError):
             instance.full_clean()
+
+
+# ─── Budget-C: Onboarding budget link ─────────────────────────────────────────
+
+def _budget(org, client=None, code='ob-bgt-01', nature='billable', status='active', is_active=True):
+    return BudgetPlan.objects.create(
+        org=org, name=f'Budget {code}', code=code,
+        budget_nature=nature, budget_type='onboarding',
+        client=client,
+        period_start=datetime.date(2025, 4, 1),
+        amount='500000.00', currency='INR',
+        status=status, is_active=is_active,
+    )
+
+
+class TestOnboardingBudgetLink(OBTestBase):
+    """Phase Budget-C: budget_plan FK on ClientOnboardingRequest."""
+
+    LIST_URL = '/api/onboarding/client-requests/'
+
+    def _detail(self, pk):
+        return f'{self.LIST_URL}{pk}/'
+
+    def _create_payload(self, client_pk, budget_pk=None):
+        payload = {
+            'client': client_pk,
+            'onboarding_type': 'new_site_expansion',
+            'summary': 'Budget link test',
+        }
+        if budget_pk is not None:
+            payload['budget_plan'] = budget_pk
+        return payload
+
+    def test_create_with_valid_billable_budget_returns_201(self):
+        """Valid billable budget linked to same client accepted."""
+        budget = _budget(self.org, client=self.client_a, code='ob-valid-01')
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['budget_plan'], budget.pk)
+
+    def test_update_with_valid_budget_returns_200(self):
+        """PATCH with a valid billable budget succeeds."""
+        budget = _budget(self.org, client=self.client_a, code='ob-patch-01')
+        req = _onboarding(self.org, self.client_a, self.admin)
+        self._login(self.admin)
+        resp = self.api.patch(self._detail(req.pk), {'budget_plan': budget.pk}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        req.refresh_from_db()
+        self.assertEqual(req.budget_plan_id, budget.pk)
+
+    def test_non_billable_budget_rejected(self):
+        """Non-billable budget on onboarding → 400."""
+        budget = _budget(self.org, code='ob-nb-01', nature='non_billable')
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_inactive_budget_rejected(self):
+        """Inactive budget rejected."""
+        budget = _budget(self.org, client=self.client_a, code='ob-inactive-01', is_active=False)
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_cross_org_budget_rejected(self):
+        """Budget from a different org rejected."""
+        budget = _budget(self.org2, client=None, code='ob-xorg-01')
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_client_mismatch_budget_rejected(self):
+        """Budget scoped to client_b rejected when onboarding is for client_a."""
+        budget = _budget(self.org, client=self.client_b, code='ob-mismatch-01')
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_response_includes_budget_display_fields(self):
+        """Read response exposes all budget_plan_* display fields."""
+        budget = _budget(self.org, client=self.client_a, code='ob-display-01')
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        detail = self.api.get(self._detail(resp.data['id']))
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.data['budget_plan'], budget.pk)
+        self.assertEqual(detail.data['budget_plan_name'], budget.name)
+        self.assertEqual(detail.data['budget_plan_code'], budget.code)
+        self.assertEqual(str(detail.data['budget_plan_amount']), str(budget.amount))
+        self.assertEqual(detail.data['budget_plan_currency'], budget.currency)
+        self.assertEqual(detail.data['budget_plan_status'], budget.status)
+
+    def test_no_budget_plan_is_allowed(self):
+        """Omitting budget_plan is valid (not yet mandatory)."""
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_closed_status_budget_rejected(self):
+        """Budget with status='closed' is not usable."""
+        budget = _budget(self.org, client=self.client_a, code='ob-closed-01', status='closed')
+        self._login(self.admin)
+        resp = self.api.post(
+            self.LIST_URL,
+            self._create_payload(self.client_a.pk, budget.pk),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_patch_client_change_invalidates_existing_budget(self):
+        """Changing client to one that doesn't match the linked budget → 400."""
+        budget = _budget(self.org, client=self.client_a, code='ob-xpatch-01')
+        req = _onboarding(self.org, self.client_a, self.admin)
+        req.budget_plan = budget
+        req.save(update_fields=['budget_plan'])
+
+        self._login(self.admin)
+        # PATCH to client_b without touching budget_plan — budget now mismatches
+        resp = self.api.patch(
+            self._detail(req.pk),
+            {'client': self.client_b.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_patch_explicit_null_clears_budget(self):
+        """Explicit budget_plan=null on PATCH clears the FK and returns 200."""
+        budget = _budget(self.org, client=self.client_a, code='ob-clear-01')
+        req = _onboarding(self.org, self.client_a, self.admin)
+        req.budget_plan = budget
+        req.save(update_fields=['budget_plan'])
+
+        self._login(self.admin)
+        resp = self.api.patch(
+            self._detail(req.pk),
+            {'budget_plan': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        req.refresh_from_db()
+        self.assertIsNone(req.budget_plan_id)

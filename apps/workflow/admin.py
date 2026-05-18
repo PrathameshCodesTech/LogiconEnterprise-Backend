@@ -3,6 +3,7 @@ from django.contrib import admin
 from .models import (
     WorkflowTemplate, WorkflowStepTemplate,
     WorkflowTemplateMapping, StepAssignmentConfig,
+    ApprovalRoute, ApprovalRouteStepAssignment,
     WorkflowInstance, WorkflowStepInstance, WorkflowAction,
 )
 
@@ -54,6 +55,37 @@ class StepAssignmentConfigAdmin(admin.ModelAdmin):
     list_filter = ['trigger_type', 'assignment_mode', 'is_active', 'org', 'department', 'client', 'site']
     readonly_fields = ['created_at', 'updated_at']
     raw_id_fields = ['org', 'client', 'site', 'named_user', 'eligible_role', 'eligible_scope', 'department']
+
+
+class ApprovalRouteStepAssignmentInline(admin.TabularInline):
+    model = ApprovalRouteStepAssignment
+    extra = 0
+    fields = ['step_code', 'assignment_mode', 'named_user', 'department', 'note', 'is_active']
+    raw_id_fields = ['named_user', 'department']
+
+
+@admin.register(ApprovalRoute)
+class ApprovalRouteAdmin(admin.ModelAdmin):
+    list_display = [
+        'name', 'code', 'org', 'trigger_type', 'client', 'site',
+        'is_default', 'is_active', 'created_at',
+    ]
+    search_fields = ['name', 'code']
+    list_filter = ['trigger_type', 'is_default', 'is_active', 'org']
+    readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['org', 'template', 'client', 'site']
+    inlines = [ApprovalRouteStepAssignmentInline]
+
+
+@admin.register(ApprovalRouteStepAssignment)
+class ApprovalRouteStepAssignmentAdmin(admin.ModelAdmin):
+    list_display = [
+        'route', 'step_code', 'assignment_mode', 'named_user', 'department', 'is_active',
+    ]
+    search_fields = ['step_code', 'named_user__username', 'route__name', 'route__code']
+    list_filter = ['assignment_mode', 'is_active', 'route__trigger_type']
+    readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['route', 'named_user', 'department']
 
 
 class WorkflowStepInstanceInline(admin.TabularInline):

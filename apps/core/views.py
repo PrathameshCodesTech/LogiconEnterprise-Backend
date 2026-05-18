@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 
 from apps.access.permissions import HasCapability
+from apps.access.querysets import filter_departments_for_user
 from apps.access.viewsets import ActionCapabilityMixin
 
 from .models import Organization, ScopeNode, Department
@@ -93,10 +94,7 @@ class DepartmentViewSet(ActionCapabilityMixin, ModelViewSet):
         user = self.request.user
         if user.is_superuser:
             return qs
-        org_id = getattr(user, 'org_id', None)
-        if org_id:
-            return qs.filter(org_id=org_id)
-        return qs.none()
+        return filter_departments_for_user(qs, user)
 
     def get_serializer_class(self):
         if self.action in ('create', 'update', 'partial_update'):

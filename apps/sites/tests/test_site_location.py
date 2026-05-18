@@ -23,6 +23,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.core.models import Organization, ScopeNode
 from apps.sites.models import Client, SiteProfile
 from apps.sites.services import apply_location_snapshots
@@ -69,6 +70,7 @@ class SiteLocationTestBase(TestCase):
 
         # Roles & users
         cls.role_admin = _role(cls.org, 'admin')
+        bootstrap_role_permissions(cls.role_admin)
         cls.admin = _user('sl_admin', org=cls.org)
         _assign(cls.admin, cls.role_admin, cls.n_company)
         cls.superuser = _user('sl_super', is_superuser=True)

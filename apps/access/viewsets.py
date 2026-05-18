@@ -4,7 +4,41 @@ apps/access/viewsets.py
 Scoped ViewSet base classes.
 """
 
+from rest_framework import status
+from rest_framework.response import Response
 from rest_framework.viewsets import ReadOnlyModelViewSet, ModelViewSet
+
+
+class ReadAfterWriteMixin:
+    """
+    Returns read-serializer data in create (201) and update (200) responses.
+
+    Set `read_serializer_class` on the ViewSet to the full read serializer.
+    The ViewSet's `get_serializer_class` should return the write serializer
+    for create/update actions.
+    """
+    read_serializer_class = None
+
+    def create(self, request, *args, **kwargs):
+        write_ser = self.get_serializer(data=request.data)
+        write_ser.is_valid(raise_exception=True)
+        self.perform_create(write_ser)
+        headers = self.get_success_headers(write_ser.data)
+        read_ser = self.read_serializer_class(
+            write_ser.instance, context=self.get_serializer_context()
+        )
+        return Response(read_ser.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        write_ser = self.get_serializer(instance, data=request.data, partial=partial)
+        write_ser.is_valid(raise_exception=True)
+        self.perform_update(write_ser)
+        read_ser = self.read_serializer_class(
+            write_ser.instance, context=self.get_serializer_context()
+        )
+        return Response(read_ser.data)
 
 
 class ActionCapabilityMixin:

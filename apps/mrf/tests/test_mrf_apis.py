@@ -16,6 +16,8 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
+from apps.budgets.models import BudgetPlan
 from apps.core.models import Department, Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
@@ -119,6 +121,10 @@ class MRFTestBase(TestCase):
         cls.r_finance = _role(cls.org, 'finance')
         # field_supervisor: no mrf.read at all
         cls.r_field_sup = _role(cls.org, 'field_supervisor')
+        bootstrap_role_permissions(cls.r_hr_admin)
+        bootstrap_role_permissions(cls.r_hr_exec)
+        bootstrap_role_permissions(cls.r_finance)
+        bootstrap_role_permissions(cls.r_field_sup)
 
         cls.hr_admin = _user('mrf_hr_admin', cls.org, cls.r_hr_admin, cls.n_co)
         cls.hr_exec = _user('mrf_hr_exec', cls.org, cls.r_hr_exec, cls.n_co)
@@ -657,3 +663,361 @@ class TestMRFLineItemAPI(MRFTestBase):
         }
         resp = self.api.post('/api/mrf/line-items/', payload, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
+
+
+# ─── Budget-C: MRF budget link ────────────────────────────────────────────────
+
+def _budget_plan(org, nature='billable', client=None, site=None, department=None,
+                 code='mrf-bgt', status='active', is_active=True):
+    return BudgetPlan.objects.create(
+        org=org, name=f'Budget {code}', code=code,
+        budget_nature=nature, budget_type='manpower',
+        client=client, site=site, department=department,
+        period_start=date(2025, 4, 1),
+        amount='1000000.00', currency='INR',
+        status=status, is_active=is_active,
+    )
+
+
+class TestMRFBudgetLink(MRFTestBase):
+    """Phase Budget-C: budget_plan FK on ManpowerRequest."""
+
+    MRF_URL = '/api/mrf/requests/'
+
+    def _mrf_payload(self, budget_pk=None, billing_type='billable'):
+        payload = {
+            'site': self.site.pk,
+            'mrf_type': 'new_hiring',
+            'billing_type': billing_type,
+            'status': 'draft',
+        }
+        if budget_pk is not None:
+            payload['budget_plan'] = budget_pk
+        return payload
+
+    def test_billable_mrf_with_matching_client_budget_succeeds(self):
+        """Billable MRF with client-level budget matching the MRF site's client."""
+        budget = _budget_plan(self.org, client=self.client_obj, code='mrf-cli-ok')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['budget_plan'], budget.pk)
+
+    def test_billable_mrf_with_matching_site_budget_succeeds(self):
+        """Billable MRF with site-level budget matching the MRF site."""
+        budget = _budget_plan(self.org, client=self.client_obj, site=self.site, code='mrf-site-ok')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['budget_plan'], budget.pk)
+
+    def test_billable_mrf_with_wrong_site_budget_rejected(self):
+        """Billable MRF with budget scoped to a different site → 400."""
+        other_org = _org('mrf-bgt-xsite')
+        _, _, _, other_site = _scope_tree(other_org)
+        budget = _budget_plan(self.org, site=other_site, code='mrf-xsite-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_billable_mrf_with_wrong_client_budget_rejected(self):
+        """Billable MRF with budget scoped to a different client → 400."""
+        other_org = _org('mrf-bgt-xcli')
+        _, _, other_client, _ = _scope_tree(other_org)
+        budget = _budget_plan(self.org, client=other_client, code='mrf-xcli-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_non_billable_mrf_with_department_budget_succeeds(self):
+        """Non-billable MRF with budget matching the required_department succeeds."""
+        budget = _budget_plan(
+            self.org, nature='non_billable',
+            department=self.dept_housekeeping, code='mrf-nb-dept-ok',
+        )
+        self._login(self.hr_admin)
+        payload = self._mrf_payload(budget.pk, billing_type='non_billable')
+        payload['required_department'] = self.dept_housekeeping.pk
+        resp = self.api.post(self.MRF_URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['budget_plan'], budget.pk)
+
+    def test_billing_type_nature_mismatch_rejected(self):
+        """Billable MRF with non-billable budget → 400."""
+        budget = _budget_plan(self.org, nature='non_billable',
+                              department=self.dept_operations, code='mrf-mismatch-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk, billing_type='billable'), format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_inactive_budget_rejected(self):
+        """Inactive budget rejected on MRF create."""
+        budget = _budget_plan(self.org, client=self.client_obj, code='mrf-inactive-01', is_active=False)
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_cross_org_budget_rejected(self):
+        """Budget from different org rejected."""
+        other_org = _org('mrf-bgt-xorg')
+        budget = _budget_plan(other_org, code='mrf-xorg-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_no_budget_plan_allowed(self):
+        """Omitting budget_plan is valid (not yet mandatory)."""
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(resp.data.get('budget_plan'))
+
+    def test_response_includes_budget_display_fields(self):
+        """MRF read response includes all budget_plan_* display fields."""
+        budget = _budget_plan(self.org, client=self.client_obj, code='mrf-disp-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(self.MRF_URL, self._mrf_payload(budget.pk), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        for field in ['budget_plan', 'budget_plan_name', 'budget_plan_code',
+                      'budget_plan_amount', 'budget_plan_currency',
+                      'budget_plan_status', 'budget_plan_nature']:
+            self.assertIn(field, resp.data, f'Missing field: {field}')
+        self.assertEqual(resp.data['budget_plan_name'], budget.name)
+        self.assertEqual(resp.data['budget_plan_nature'], 'billable')
+
+    def test_patch_site_change_invalidates_existing_budget(self):
+        """Changing MRF site to one where the existing budget doesn't match → 400."""
+        # Build a second site in the same org with a different client
+        n_co2 = ScopeNode.objects.create(
+            org=self.org, code='mrf-xpatch-co', name='mrf-xpatch-co',
+            node_type='company', parent=None, depth=0, path='mrf-xpatch-co', is_active=True,
+        )
+        other_client = Client.objects.create(
+            org=self.org, name='Other Client Patch', code='mrf-xpatch-cli',
+            scope_node=n_co2, is_active=True,
+        )
+        other_site = SiteProfile.objects.create(
+            org=self.org, client=other_client, scope_node=n_co2,
+            name='Other Site Patch', code='mrf-xpatch-site', city='Pune', state='MH', is_active=True,
+        )
+        # Budget scoped to original site's client
+        budget = _budget_plan(self.org, client=self.client_obj, code='mrf-xpatch-01')
+        mrf = _mrf(self.org, self.site, self.hr_admin, status='draft', billing_type='billable')
+        mrf.budget_plan = budget
+        mrf.save(update_fields=['budget_plan'])
+
+        self._login(self.hr_admin)
+        # PATCH site to other_site — budget no longer matches other_client
+        resp = self.api.patch(
+            f'{self.MRF_URL}{mrf.pk}/',
+            {'site': other_site.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_patch_billing_type_change_invalidates_existing_budget(self):
+        """Changing billing_type from billable to non_billable without updating budget → 400."""
+        budget = _budget_plan(self.org, client=self.client_obj, code='mrf-btchange-01')
+        mrf = _mrf(self.org, self.site, self.hr_admin, status='draft', billing_type='billable')
+        mrf.budget_plan = budget
+        mrf.save(update_fields=['budget_plan'])
+
+        self._login(self.hr_admin)
+        resp = self.api.patch(
+            f'{self.MRF_URL}{mrf.pk}/',
+            {'billing_type': 'non_billable'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_patch_explicit_null_clears_mrf_budget(self):
+        """Explicit budget_plan=null on PATCH clears the FK and returns 200."""
+        budget = _budget_plan(self.org, client=self.client_obj, code='mrf-clear-01')
+        mrf = _mrf(self.org, self.site, self.hr_admin, status='draft', billing_type='billable')
+        mrf.budget_plan = budget
+        mrf.save(update_fields=['budget_plan'])
+
+        self._login(self.hr_admin)
+        resp = self.api.patch(
+            f'{self.MRF_URL}{mrf.pk}/',
+            {'budget_plan': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        mrf.refresh_from_db()
+        self.assertIsNone(mrf.budget_plan_id)
+
+
+# ─── Budget-C: MRF line item budget link ─────────────────────────────────────
+
+class TestMRFLineItemBudgetLink(MRFTestBase):
+    """Phase Budget-C: budget_plan FK on MRFLineItem with auto-default from MRF."""
+
+    LI_URL = '/api/mrf/line-items/'
+    MRF_URL = '/api/mrf/requests/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.budget_client = _budget_plan(
+            cls.org, nature='billable', client=cls.client_obj, code='li-bgt-cli',
+        )
+        cls.mrf_with_budget = _mrf(
+            cls.org, cls.site, cls.hr_admin, mrf_type='new_hiring',
+            status='draft', billing_type='billable',
+        )
+        cls.mrf_with_budget.budget_plan = cls.budget_client
+        cls.mrf_with_budget.save(update_fields=['budget_plan'])
+
+        cls.mrf_no_budget = _mrf(
+            cls.org, cls.site, cls.hr_admin, mrf_type='new_hiring',
+            status='draft', billing_type='billable',
+        )
+
+    def _li_payload(self, mrf_pk, budget_pk=None):
+        payload = {
+            'mrf': mrf_pk,
+            'job_role': self.job_role.pk,
+            'headcount': 1,
+        }
+        if budget_pk is not None:
+            payload['budget_plan'] = budget_pk
+        return payload
+
+    def test_line_item_auto_inherits_mrf_budget(self):
+        """Line item without budget_plan auto-defaults to MRF's budget_plan."""
+        self._login(self.hr_admin)
+        resp = self.api.post(self.LI_URL, self._li_payload(self.mrf_with_budget.pk), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['budget_plan'], self.budget_client.pk)
+
+    def test_line_item_no_budget_when_mrf_has_none(self):
+        """Line item without budget_plan stays null when MRF has no budget."""
+        self._login(self.hr_admin)
+        resp = self.api.post(self.LI_URL, self._li_payload(self.mrf_no_budget.pk), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(resp.data.get('budget_plan'))
+
+    def test_line_item_can_override_with_valid_budget(self):
+        """Line item can explicitly set a different valid budget."""
+        budget2 = _budget_plan(self.org, client=self.client_obj, code='li-override-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(
+            self.LI_URL, self._li_payload(self.mrf_with_budget.pk, budget2.pk), format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['budget_plan'], budget2.pk)
+
+    def test_line_item_wrong_nature_rejected(self):
+        """Non-billable budget on billable MRF line item → 400."""
+        nb_budget = _budget_plan(
+            self.org, nature='non_billable',
+            department=self.dept_operations, code='li-nb-01',
+        )
+        self._login(self.hr_admin)
+        resp = self.api.post(
+            self.LI_URL, self._li_payload(self.mrf_with_budget.pk, nb_budget.pk), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_line_item_wrong_site_budget_rejected(self):
+        """Budget scoped to a different site rejected on line item."""
+        other_org = _org('li-bgt-xsite')
+        _, _, _, other_site = _scope_tree(other_org)
+        bad_budget = _budget_plan(self.org, site=other_site, code='li-xsite-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(
+            self.LI_URL, self._li_payload(self.mrf_with_budget.pk, bad_budget.pk), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_line_item_inactive_budget_rejected(self):
+        """Inactive budget rejected on line item create."""
+        inactive = _budget_plan(
+            self.org, client=self.client_obj, code='li-inactive-01', is_active=False,
+        )
+        self._login(self.hr_admin)
+        resp = self.api.post(
+            self.LI_URL, self._li_payload(self.mrf_with_budget.pk, inactive.pk), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_line_item_cross_org_budget_rejected(self):
+        """Budget from different org rejected on line item create."""
+        other_org = _org('li-bgt-xorg')
+        cross_budget = _budget_plan(other_org, code='li-xorg-01')
+        self._login(self.hr_admin)
+        resp = self.api.post(
+            self.LI_URL, self._li_payload(self.mrf_with_budget.pk, cross_budget.pk), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_line_item_response_includes_budget_display_fields(self):
+        """Line item read response includes all budget_plan_* display fields."""
+        self._login(self.hr_admin)
+        resp = self.api.post(self.LI_URL, self._li_payload(self.mrf_with_budget.pk), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        for field in ['budget_plan', 'budget_plan_name', 'budget_plan_code',
+                      'budget_plan_amount', 'budget_plan_currency',
+                      'budget_plan_status', 'budget_plan_nature']:
+            self.assertIn(field, resp.data, f'Missing field: {field}')
+        self.assertEqual(resp.data['budget_plan_name'], self.budget_client.name)
+        self.assertEqual(resp.data['budget_plan_nature'], 'billable')
+
+    def test_patch_mrf_change_invalidates_existing_line_item_budget(self):
+        """Moving a line item to an MRF on a different client invalidates the existing budget."""
+        # Create a line item under mrf_with_budget (site=self.site, client=self.client_obj)
+        li = _line_item(self.mrf_with_budget, self.job_role)
+        li.budget_plan = self.budget_client
+        li.save(update_fields=['budget_plan'])
+
+        # Create another MRF for a different client's site
+        n_other = ScopeNode.objects.create(
+            org=self.org, code='li-xmrf-co', name='li-xmrf-co',
+            node_type='company', parent=None, depth=0, path='li-xmrf-co', is_active=True,
+        )
+        other_client = Client.objects.create(
+            org=self.org, name='LI XMrf Client', code='li-xmrf-cli',
+            scope_node=n_other, is_active=True,
+        )
+        other_site = SiteProfile.objects.create(
+            org=self.org, client=other_client, scope_node=n_other,
+            name='LI XMrf Site', code='li-xmrf-site', city='Delhi', state='DL', is_active=True,
+        )
+        other_mrf = _mrf(self.org, other_site, self.hr_admin, billing_type='billable')
+
+        self._login(self.hr_admin)
+        resp = self.api.patch(
+            f'{self.LI_URL}{li.pk}/',
+            {'mrf': other_mrf.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('budget_plan', str(resp.data))
+
+    def test_patch_line_item_explicit_null_clears_budget(self):
+        """Explicit budget_plan=null on line item PATCH clears the FK and returns 200."""
+        li = _line_item(self.mrf_with_budget, self.job_role)
+        li.budget_plan = self.budget_client
+        li.save(update_fields=['budget_plan'])
+
+        self._login(self.hr_admin)
+        resp = self.api.patch(
+            f'{self.LI_URL}{li.pk}/',
+            {'budget_plan': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        li.refresh_from_db()
+        self.assertIsNone(li.budget_plan_id)

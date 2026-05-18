@@ -40,6 +40,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.access.scope import (
     get_accessible_scope_paths,
     user_has_capability,
@@ -131,6 +132,12 @@ class ScopeTestBase(TestCase):
         _assign_role(cls.client_admin_user, cls.role_client_admin, cls.n_client_a)
         _assign_role(cls.site_user, cls.role_site_user, cls.n_site_a1)
         _assign_role(cls.hr_user, cls.role_hr_admin, cls.n_company)
+
+        # ── DB permissions (runtime source of truth after RBAC-Runtime-A) ──
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_client_admin)
+        bootstrap_role_permissions(cls.role_site_user)
+        bootstrap_role_permissions(cls.role_hr_admin)
 
         # ── Clients ──
         cls.client_a = Client.objects.create(

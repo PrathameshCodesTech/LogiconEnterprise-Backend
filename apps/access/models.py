@@ -41,6 +41,7 @@ PERMISSION_RESOURCE_CHOICES = [
     ('resume', 'Resume'),
     ('mrf', 'MRF'),
     ('workflow', 'Workflow'),
+    ('workflow_config', 'Workflow Config'),
     ('wage', 'Wage'),
     ('budget', 'Budget'),
     ('interview', 'Interview'),
@@ -76,6 +77,7 @@ class AccessRole(TimeStampedModel):
 
 class Permission(models.Model):
     """A single action on a resource."""
+    code = models.CharField(max_length=128, unique=True, blank=True)
     action = models.CharField(max_length=32, choices=PERMISSION_ACTION_CHOICES)
     resource = models.CharField(max_length=64, choices=PERMISSION_RESOURCE_CHOICES)
     description = models.CharField(max_length=255, blank=True)
@@ -87,7 +89,7 @@ class Permission(models.Model):
         ordering = ['resource', 'action']
 
     def __str__(self):
-        return f"{self.resource}.{self.action}"
+        return self.code or f"{self.resource}.{self.action}"
 
 
 class AccessRolePermission(models.Model):

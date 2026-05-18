@@ -26,6 +26,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
+from apps.access.tests.utils import bootstrap_role_permissions
 from apps.audit.models import AuditLog
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
@@ -70,6 +71,10 @@ class SitesWriteTestBase(TestCase):
         cls.role_sales_exec = _role(cls.org, 'sales_executive')
         cls.role_client_admin = _role(cls.org, 'client_admin')
         cls.role_client_user = _role(cls.org, 'client_user')
+        bootstrap_role_permissions(cls.role_admin)
+        bootstrap_role_permissions(cls.role_sales_exec)
+        bootstrap_role_permissions(cls.role_client_admin)
+        bootstrap_role_permissions(cls.role_client_user)
 
         cls.superuser = _user('sw_superuser', is_superuser=True)
         cls.admin_user = _user('sw_admin')

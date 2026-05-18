@@ -10,6 +10,7 @@ to validate against approved headcount limits.
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 from apps.core.models import Organization, TimeStampedModel
 
@@ -89,9 +90,39 @@ class ManpowerRequest(TimeStampedModel):
         default=False,
         help_text='Whether this MRF is visible to the client user portal.',
     )
+    budget_plan = models.ForeignKey(
+        'budgets.BudgetPlan',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='mrf_requests',
+    )
+
     submitted_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     rejected_at = models.DateTimeField(null=True, blank=True)
+
+    # ── Client-form header fields ─────────────────────────────────────────────
+    request_number = models.CharField(max_length=64, blank=True)
+
+    experience_min_years = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+    )
+    experience_max_years = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+    )
+
+    reporting_to = models.CharField(max_length=255, blank=True)
+    mis_requirement = models.CharField(max_length=255, blank=True)
+
+    education_requirement = models.TextField(blank=True)
+    gender_preference = models.CharField(max_length=64, blank=True)
+    special_requirement = models.TextField(blank=True)
+
+    salary_range_text = models.CharField(max_length=255, blank=True)
+    ctc_budget_text = models.CharField(max_length=255, blank=True)
+
+    reference_note = models.TextField(blank=True)
+    other_remarks = models.TextField(blank=True)
 
     class Meta:
         verbose_name = 'Manpower Request'
@@ -100,6 +131,13 @@ class ManpowerRequest(TimeStampedModel):
         indexes = [
             models.Index(fields=['org', 'status']),
             models.Index(fields=['site', 'status']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['org', 'request_number'],
+                condition=~Q(request_number=''),
+                name='unique_mrf_request_number_per_org_when_set',
+            ),
         ]
 
     def __str__(self):
@@ -145,9 +183,52 @@ class MRFLineItem(models.Model):
     budget_min = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     budget_max = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
+    budget_plan = models.ForeignKey(
+        'budgets.BudgetPlan',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='mrf_line_items',
+    )
+
     class Meta:
         verbose_name = 'MRF Line Item'
         verbose_name_plural = 'MRF Line Items'
 
     def __str__(self):
         return f"MRF #{self.mrf_id} - {self.job_role} x {self.headcount}"
+
+
+class MRFSupportRequirement(TimeStampedModel):
+    """IT and Admin support checklist linked one-to-one to an MRF."""
+
+    mrf = models.OneToOneField(
+        ManpowerRequest,
+        on_delete=models.CASCADE,
+        related_name='support_requirement',
+    )
+
+    # IT Use Only
+    laptop_required = models.BooleanField(default=False)
+    desktop_required = models.BooleanField(default=False)
+    mail_id_required = models.BooleanField(default=False)
+    hrms_login_required = models.BooleanField(default=False)
+    outlook_required = models.BooleanField(default=False)
+    ms_office_required = models.BooleanField(default=False)
+    windows_required = models.BooleanField(default=False)
+    own_or_rental = models.CharField(max_length=64, blank=True)
+
+    # Admin Use Only
+    sim_card_required = models.BooleanField(default=False)
+    data_card_required = models.BooleanField(default=False)
+    uniform_required = models.BooleanField(default=False)
+    visiting_cards_required = models.BooleanField(default=False)
+    seating_required = models.BooleanField(default=False)
+    admin_location = models.CharField(max_length=255, blank=True)
+    admin_other = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'MRF Support Requirement'
+        verbose_name_plural = 'MRF Support Requirements'
+
+    def __str__(self):
+        return f"Support for MRF #{self.mrf_id}"
