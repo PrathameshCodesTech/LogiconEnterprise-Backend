@@ -23,6 +23,11 @@ from .models import ManpowerRequest, MRFLineItem, MRFSupportRequirement
 class MRFLineItemSerializer(serializers.ModelSerializer):
     """Read serializer — all fields read-only."""
 
+    # ── Commercial override / effective value fields ──────────────────────────
+    effective_wage_min = serializers.SerializerMethodField()
+    effective_wage_max = serializers.SerializerMethodField()
+    commercial_overridden_by_name = serializers.SerializerMethodField()
+
     budget_plan_name = serializers.CharField(source='budget_plan.name', read_only=True, default=None)
     budget_plan_code = serializers.CharField(source='budget_plan.code', read_only=True, default=None)
     budget_plan_amount = serializers.DecimalField(
@@ -65,6 +70,14 @@ class MRFLineItemSerializer(serializers.ModelSerializer):
             'replacement_for_employee', 'required_skills', 'wage_category',
             'min_wage_snapshot', 'wage_min_requested', 'wage_max_requested',
             'billing_rate_snapshot', 'budget_min', 'budget_max',
+            # master snapshots
+            'master_wage_min_snapshot', 'master_wage_max_snapshot',
+            'master_billing_rate_snapshot', 'master_shift_hours_snapshot',
+            # override audit
+            'commercial_override_enabled', 'commercial_override_reason',
+            'commercial_overridden_by', 'commercial_overridden_by_name', 'commercial_overridden_at',
+            # effective (resolved) values
+            'effective_wage_min', 'effective_wage_max',
             'budget_plan', 'budget_plan_name', 'budget_plan_code',
             'budget_plan_amount', 'budget_plan_currency', 'budget_plan_status', 'budget_plan_nature',
             'site_role_requirement_label', 'srr_department_name',
@@ -91,9 +104,50 @@ class MRFLineItemSerializer(serializers.ModelSerializer):
         already = get_billable_headcount_usage(srr.site, obj.job_role, exclude_mrf=obj.mrf)
         return max(0, srr.approved_headcount - already)
 
+    def get_effective_wage_min(self, obj):
+        if obj.wage_min_requested is not None:
+            return str(obj.wage_min_requested)
+        if obj.master_wage_min_snapshot is not None:
+            return str(obj.master_wage_min_snapshot)
+        return None
+
+    def get_effective_wage_max(self, obj):
+        if obj.wage_max_requested is not None:
+            return str(obj.wage_max_requested)
+        if obj.master_wage_max_snapshot is not None:
+            return str(obj.master_wage_max_snapshot)
+        return None
+
+    def get_commercial_overridden_by_name(self, obj):
+        if obj.commercial_overridden_by_id:
+            return obj.commercial_overridden_by.username
+        return None
+
+
+def _detect_commercial_override(data, snapshot):
+    """Return True if any commercial field in data diverges from the SRR snapshot."""
+    from decimal import Decimal
+
+    def _neq(field, snap_key):
+        if field not in data:
+            return False
+        val = data[field]
+        snap = snapshot.get(snap_key)
+        if val is None or snap is None:
+            return False
+        return Decimal(str(val)) != Decimal(str(snap))
+
+    return (
+        _neq('wage_min_requested', 'wage_min')
+        or _neq('wage_max_requested', 'wage_max')
+        or _neq('billing_rate_snapshot', 'billing_rate')
+    )
+
 
 class MRFLineItemWriteSerializer(serializers.ModelSerializer):
     """Write serializer for line item create/update."""
+
+    commercial_override_reason = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = MRFLineItem
@@ -103,6 +157,7 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
             'wage_min_requested', 'wage_max_requested',
             'billing_rate_snapshot', 'budget_min', 'budget_max',
             'budget_plan',
+            'commercial_override_reason',
         ]
         extra_kwargs = {
             'budget_plan': {'required': False, 'allow_null': True},
@@ -195,6 +250,35 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
                 )
                 if li_errors:
                     raise serializers.ValidationError(li_errors)
+
+        # ── Commercial override enforcement ───────────────────────────────────
+        COMMERCIAL_FIELDS = {'wage_min_requested', 'wage_max_requested', 'billing_rate_snapshot'}
+        commercial_in_payload = any(f in data for f in COMMERCIAL_FIELDS)
+        self._override_result = None
+
+        if commercial_in_payload and mrf and mrf.billing_type == 'billable' and srr:
+            from apps.mrf.services import build_line_item_commercial_snapshot
+            from apps.access.capabilities import get_user_capabilities, MRF_OVERRIDE_COMMERCIALS
+            snapshot = build_line_item_commercial_snapshot(srr)
+            override_detected = _detect_commercial_override(data, snapshot)
+            user = self.context.get('request').user if self.context.get('request') else None
+            if override_detected:
+                user_caps = get_user_capabilities(user) if user else []
+                if MRF_OVERRIDE_COMMERCIALS not in user_caps:
+                    raise serializers.ValidationError(
+                        'You do not have permission to override SRR commercial values.'
+                    )
+                reason = data.get('commercial_override_reason', '')
+                if not str(reason).strip():
+                    raise serializers.ValidationError({
+                        'commercial_override_reason': (
+                            'A reason is required when overriding commercial values.'
+                        )
+                    })
+                self._override_result = {'detected': True, 'user': user, 'in_payload': True}
+            else:
+                data['commercial_override_reason'] = ''
+                self._override_result = {'detected': False, 'user': None, 'in_payload': True}
 
         return data
 

@@ -18,6 +18,7 @@ from .constants import SUPPORTED_LANGUAGES, LANGUAGE_NATIVE_LABELS
 from .models import (
     QRCampaign, CampaignJobRole, FormField,
     IntakeSubmission, IntakeSubmissionAnswer, IntakeDocument,
+    FormTemplate, FormSection, FormTemplateField,
 )
 from .services import normalize_mobile, normalize_role_title, validate_mobile
 
@@ -141,6 +142,46 @@ class FormFieldSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
 
+class FormTemplateFieldSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FormTemplateField
+        fields = [
+            'id', 'section', 'role', 'label', 'field_key', 'field_type',
+            'help_text', 'placeholder', 'options', 'is_required', 'sort_order',
+            'min_length', 'max_length', 'min_value', 'max_value',
+            'translations', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class FormSectionSerializer(serializers.ModelSerializer):
+    template_fields = FormTemplateFieldSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = FormSection
+        fields = [
+            'id', 'template', 'name', 'code', 'description',
+            'sort_order', 'is_active', 'created_at', 'updated_at',
+            'template_fields',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class FormTemplateSerializer(serializers.ModelSerializer):
+    sections = FormSectionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = FormTemplate
+        fields = ['id', 'org', 'name', 'code', 'description', 'is_active', 'sections', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'org', 'created_at', 'updated_at']
+
+
+class FormTemplateWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FormTemplate
+        fields = ['name', 'code', 'description', 'is_active']
+
+
 class IntakeSubmissionAnswerSerializer(serializers.ModelSerializer):
     class Meta:
         model = IntakeSubmissionAnswer
@@ -218,14 +259,57 @@ class PublicJobRoleSerializer(serializers.Serializer):
 
 
 class PublicFormFieldSerializer(serializers.ModelSerializer):
+    field_source = serializers.SerializerMethodField()
+    section_id = serializers.SerializerMethodField()
+    section_name = serializers.SerializerMethodField()
+    section_code = serializers.SerializerMethodField()
+    section_sort_order = serializers.SerializerMethodField()
+
     class Meta:
         model = FormField
         fields = [
             'id', 'label', 'field_key', 'field_type', 'help_text',
             'placeholder', 'options', 'is_required', 'sort_order',
             'min_length', 'max_length', 'min_value', 'max_value',
-            'role', 'translations',
+            'role', 'translations', 'field_source',
+            'section_id', 'section_name', 'section_code', 'section_sort_order',
         ]
+
+    def get_field_source(self, obj):
+        return 'campaign'
+
+    def get_section_id(self, obj):
+        return None
+
+    def get_section_name(self, obj):
+        return None
+
+    def get_section_code(self, obj):
+        return None
+
+    def get_section_sort_order(self, obj):
+        return None
+
+
+class PublicTemplateFieldSerializer(serializers.ModelSerializer):
+    field_source = serializers.SerializerMethodField()
+    section_id = serializers.IntegerField(source='section.id', read_only=True)
+    section_name = serializers.CharField(source='section.name', read_only=True)
+    section_code = serializers.CharField(source='section.code', read_only=True)
+    section_sort_order = serializers.IntegerField(source='section.sort_order', read_only=True)
+
+    class Meta:
+        model = FormTemplateField
+        fields = [
+            'id', 'label', 'field_key', 'field_type', 'help_text',
+            'placeholder', 'options', 'is_required', 'sort_order',
+            'min_length', 'max_length', 'min_value', 'max_value',
+            'role', 'translations', 'field_source',
+            'section_id', 'section_name', 'section_code', 'section_sort_order',
+        ]
+
+    def get_field_source(self, obj):
+        return 'template'
 
 
 class PublicCampaignSerializer(serializers.ModelSerializer):
@@ -263,6 +347,16 @@ class PublicCampaignSerializer(serializers.ModelSerializer):
         ]
 
     def get_common_fields(self, obj):
+        if obj.form_template_id:
+            fields = list(
+                FormTemplateField.objects.filter(
+                    section__template=obj.form_template,
+                    section__is_active=True,
+                    is_active=True,
+                    role__isnull=True,
+                ).select_related('section').order_by('section__sort_order', 'sort_order', 'id')
+            )
+            return PublicTemplateFieldSerializer(fields, many=True).data
         fields = list(
             obj.form_fields.filter(is_active=True, role__isnull=True).order_by('sort_order', 'id')
         )
@@ -271,6 +365,20 @@ class PublicCampaignSerializer(serializers.ModelSerializer):
         return PublicFormFieldSerializer(fields, many=True).data
 
     def get_role_fields(self, obj):
+        if obj.form_template_id:
+            fields = FormTemplateField.objects.filter(
+                section__template=obj.form_template,
+                section__is_active=True,
+                is_active=True,
+                role__isnull=False,
+            ).select_related('section', 'role').order_by('section__sort_order', 'sort_order', 'id')
+            result = {}
+            for f in fields:
+                key = str(f.role_id)
+                if key not in result:
+                    result[key] = []
+                result[key].append(PublicTemplateFieldSerializer(f).data)
+            return result
         fields = obj.form_fields.filter(is_active=True, role__isnull=False).order_by('sort_order', 'id')
         result = {}
         for f in fields:
@@ -367,15 +475,24 @@ class SubmissionCreateSerializer(serializers.Serializer):
         for ans in value:
             if not isinstance(ans, dict):
                 raise serializers.ValidationError("Each answer must be an object.")
-            if 'field_id' not in ans:
-                raise serializers.ValidationError("Each answer must include field_id.")
+            has_field_id = 'field_id' in ans
+            has_template_field_id = 'template_field_id' in ans
+            if not has_field_id and not has_template_field_id:
+                raise serializers.ValidationError("Each answer must include field_id or template_field_id.")
             if 'value' not in ans:
                 raise serializers.ValidationError("Each answer must include value.")
-            try:
-                field_id = int(ans['field_id'])
-            except (TypeError, ValueError):
-                raise serializers.ValidationError("field_id must be an integer.")
-            normalized.append({'field_id': field_id, 'value': ans['value']})
+            if has_field_id:
+                try:
+                    field_id = int(ans['field_id'])
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError("field_id must be an integer.")
+                normalized.append({'field_id': field_id, 'value': ans['value']})
+            else:
+                try:
+                    tmpl_field_id = int(ans['template_field_id'])
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError("template_field_id must be an integer.")
+                normalized.append({'template_field_id': tmpl_field_id, 'value': ans['value']})
         return normalized
 
     def validate(self, data):
@@ -407,37 +524,70 @@ class SubmissionCreateSerializer(serializers.Serializer):
 
         answers = data.get('answers', [])
         provided_field_ids = set()
+        provided_template_field_ids = set()
         if answers:
-            field_ids = [a['field_id'] for a in answers]
-            fields_map = {
-                f.id: f
-                for f in FormField.objects.filter(
-                    id__in=field_ids, campaign=campaign, is_active=True,
-                )
-            }
+            campaign_field_ids = [a['field_id'] for a in answers if 'field_id' in a]
+            template_field_ids_raw = [a['template_field_id'] for a in answers if 'template_field_id' in a]
+
+            fields_map = {}
+            if campaign_field_ids:
+                fields_map = {
+                    f.id: f
+                    for f in FormField.objects.filter(
+                        id__in=campaign_field_ids, campaign=campaign, is_active=True,
+                    )
+                }
+
+            tmpl_fields_map = {}
+            if template_field_ids_raw and campaign.form_template_id:
+                tmpl_fields_map = {
+                    f.id: f
+                    for f in FormTemplateField.objects.filter(
+                        id__in=template_field_ids_raw,
+                        section__template=campaign.form_template,
+                        is_active=True,
+                    )
+                }
+
             validated_answers = []
             for ans in answers:
-                field = fields_map.get(ans['field_id'])
-                if not field:
-                    raise serializers.ValidationError(
-                        f"Field {ans['field_id']} does not belong to this campaign."
-                    )
-                if field.role_id is not None and (job_role is None or field.role_id != job_role.id):
-                    raise serializers.ValidationError(
-                        f"Field '{field.label}' is not valid for the selected role."
-                    )
-                provided_field_ids.add(field.id)
-                self._validate_field_value(field, ans['value'])
-                validated_answers.append({'field': field, 'value': ans['value']})
+                if 'field_id' in ans:
+                    field = fields_map.get(ans['field_id'])
+                    if not field:
+                        raise serializers.ValidationError(
+                            f"Field {ans['field_id']} does not belong to this campaign."
+                        )
+                    if field.role_id is not None and (job_role is None or field.role_id != job_role.id):
+                        raise serializers.ValidationError(
+                            f"Field '{field.label}' is not valid for the selected role."
+                        )
+                    provided_field_ids.add(field.id)
+                    self._validate_field_value(field, ans['value'])
+                    validated_answers.append({'field': field, 'value': ans['value'], 'field_source': 'campaign'})
+                else:
+                    tmpl_field = tmpl_fields_map.get(ans['template_field_id'])
+                    if not tmpl_field:
+                        raise serializers.ValidationError(
+                            f"Template field {ans['template_field_id']} does not belong to this campaign's template."
+                        )
+                    if tmpl_field.role_id is not None and (job_role is None or tmpl_field.role_id != job_role.id):
+                        raise serializers.ValidationError(
+                            f"Field '{tmpl_field.label}' is not valid for the selected role."
+                        )
+                    provided_template_field_ids.add(tmpl_field.id)
+                    self._validate_field_value(tmpl_field, ans['value'])
+                    validated_answers.append({'template_field': tmpl_field, 'value': ans['value'], 'field_source': 'template'})
             data['answers'] = validated_answers
 
-        self._validate_required_fields(campaign, job_role, provided_field_ids, data.get('answers', []))
+        self._validate_required_fields(
+            campaign, job_role, provided_field_ids, provided_template_field_ids, data.get('answers', [])
+        )
 
-        answers_by_key = {
-            ans['field'].field_key: ans['value']
-            for ans in data.get('answers', [])
-            if 'field' in ans
-        }
+        answers_by_key = {}
+        for ans in data.get('answers', []):
+            field_obj = ans.get('field') or ans.get('template_field')
+            if field_obj:
+                answers_by_key[field_obj.field_key] = ans['value']
         self._validate_business_rules(answers_by_key)
 
         return data
@@ -472,21 +622,41 @@ class SubmissionCreateSerializer(serializers.Serializer):
                 "Selected role is not valid for this campaign."
             )
 
-    def _validate_required_fields(self, campaign, job_role, provided_field_ids, validated_answers):
-        required_fields = FormField.objects.filter(
-            campaign=campaign,
-            is_active=True,
-            is_required=True,
-        ).exclude(field_type='file').filter(Q(role__isnull=True) | Q(role=job_role))
-        answer_values = {
-            ans['field'].id: ans['value']
-            for ans in validated_answers
-            if 'field' in ans
-        }
-        missing = []
-        for field in required_fields:
-            if field.id not in provided_field_ids or answer_values.get(field.id) in ('', None, []):
-                missing.append(field.label)
+    def _validate_required_fields(
+        self, campaign, job_role, provided_field_ids, provided_template_field_ids, validated_answers
+    ):
+        if campaign.form_template_id:
+            required_fields = FormTemplateField.objects.filter(
+                section__template=campaign.form_template,
+                is_active=True,
+                is_required=True,
+            ).exclude(field_type='file').filter(Q(role__isnull=True) | Q(role=job_role))
+            answer_values = {
+                ans['template_field'].id: ans['value']
+                for ans in validated_answers
+                if 'template_field' in ans
+            }
+            missing = [
+                f.label
+                for f in required_fields
+                if f.id not in provided_template_field_ids or answer_values.get(f.id) in ('', None, [])
+            ]
+        else:
+            required_fields = FormField.objects.filter(
+                campaign=campaign,
+                is_active=True,
+                is_required=True,
+            ).exclude(field_type='file').filter(Q(role__isnull=True) | Q(role=job_role))
+            answer_values = {
+                ans['field'].id: ans['value']
+                for ans in validated_answers
+                if 'field' in ans
+            }
+            missing = [
+                f.label
+                for f in required_fields
+                if f.id not in provided_field_ids or answer_values.get(f.id) in ('', None, [])
+            ]
         if missing:
             raise serializers.ValidationError(
                 f"Required fields missing: {', '.join(missing)}."
@@ -581,6 +751,7 @@ class SubmissionCreateSerializer(serializers.Serializer):
                     )
             except ValueError:
                 pass
+
 
 
 class SubmissionResponseSerializer(serializers.ModelSerializer):

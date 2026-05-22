@@ -277,6 +277,36 @@ def filter_submissions_for_user(queryset, user):
     return queryset.filter(site_q | client_q | no_site_q).distinct()
 
 
+def filter_form_templates_for_user(queryset, user):
+    """Filter FormTemplate queryset to user's organization."""
+    if user.is_superuser:
+        return queryset
+    org_id = getattr(user, 'org_id', None)
+    if not org_id:
+        return queryset.none()
+    return queryset.filter(org_id=org_id)
+
+
+def filter_form_sections_for_user(queryset, user):
+    """Filter FormSection queryset via template's organization."""
+    if user.is_superuser:
+        return queryset
+    org_id = getattr(user, 'org_id', None)
+    if not org_id:
+        return queryset.none()
+    return queryset.filter(template__org_id=org_id)
+
+
+def filter_template_fields_for_user(queryset, user):
+    """Filter FormTemplateField queryset via template's organization."""
+    if user.is_superuser:
+        return queryset
+    org_id = getattr(user, 'org_id', None)
+    if not org_id:
+        return queryset.none()
+    return queryset.filter(section__template__org_id=org_id)
+
+
 def filter_users_for_user(queryset, user):
     """
     Filter User queryset to users in the same org as the actor.

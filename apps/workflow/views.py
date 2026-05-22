@@ -99,16 +99,10 @@ def _my_tasks_steps_queryset(user, see_all_active_for_superuser):
     """
     from .models import WorkflowStepInstance
 
-    scoped_active_workflow_ids = (
-        _workflow_instance_qs_for_user(user)
-        .filter(status='active')
-        .values('id')
-    )
     qs = (
         WorkflowStepInstance.objects.filter(
             status='active',
             workflow__status='active',
-            workflow_id__in=scoped_active_workflow_ids,
         )
         .select_related(
             'workflow',
@@ -127,7 +121,34 @@ def _my_tasks_steps_queryset(user, see_all_active_for_superuser):
     )
     if user.is_superuser and see_all_active_for_superuser:
         return qs
-    return qs.filter(assigned_user=user)
+    qs = qs.filter(assigned_user=user)
+    if user.is_superuser:
+        return qs
+
+    from apps.access.scope import get_accessible_scope_paths
+    from apps.access.querysets import _scope_q
+
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return qs.none()
+
+    mrf_site_q = _scope_q('workflow__mrf__site__scope_node__path', paths)
+    mrf_client_q = _scope_q('workflow__mrf__site__client__scope_node__path', paths)
+    onboarding_client_q = _scope_q(
+        'workflow__client_onboarding_request__client__scope_node__path',
+        paths,
+    )
+    org_id = getattr(user, 'org_id', None)
+    onboarding_no_client_q = (
+        Q(
+            workflow__client_onboarding_request__client__isnull=True,
+            workflow__client_onboarding_request__org_id=org_id,
+        )
+        if org_id else Q(pk__in=[])
+    )
+    return qs.filter(
+        mrf_site_q | mrf_client_q | onboarding_client_q | onboarding_no_client_q
+    ).distinct()
 
 
 def _my_task_detail_base_queryset(user):

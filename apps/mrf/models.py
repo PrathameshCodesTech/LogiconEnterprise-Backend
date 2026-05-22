@@ -183,6 +183,19 @@ class MRFLineItem(models.Model):
     budget_min = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     budget_max = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
+    # ── Commercial override fields ────────────────────────────────────────────
+    master_wage_min_snapshot = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    master_wage_max_snapshot = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    master_billing_rate_snapshot = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    master_shift_hours_snapshot = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True)
+    commercial_override_enabled = models.BooleanField(default=False)
+    commercial_override_reason = models.TextField(blank=True)
+    commercial_overridden_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='mrf_line_item_overrides',
+    )
+    commercial_overridden_at = models.DateTimeField(null=True, blank=True)
+
     budget_plan = models.ForeignKey(
         'budgets.BudgetPlan',
         on_delete=models.SET_NULL,

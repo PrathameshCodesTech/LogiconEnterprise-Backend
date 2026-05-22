@@ -21,6 +21,7 @@ from .models import (
     IntakeSubmissionAnswer,
     IntakeDocument,
     FormField,
+    FormTemplateField,
 )
 
 
@@ -177,19 +178,31 @@ def validate_submission_documents(campaign, job_role, files) -> None:
     for _, f in all_files:
         validate_submission_file(f)
 
-    required_file_fields = FormField.objects.filter(
-        campaign=campaign,
-        is_active=True,
-        is_required=True,
-        field_type='file',
-    ).filter(Q(role__isnull=True) | Q(role=job_role))
-
     provided_names = {field_name for field_name, _ in all_files}
     missing = []
-    for field in required_file_fields:
-        allowed_names = {field.field_key, f'field_{field.id}', f'file_{field.id}'}
-        if not provided_names.intersection(allowed_names):
-            missing.append(field.label)
+
+    if campaign.form_template_id:
+        required_file_fields = FormTemplateField.objects.filter(
+            section__template=campaign.form_template,
+            is_active=True,
+            is_required=True,
+            field_type='file',
+        ).filter(Q(role__isnull=True) | Q(role=job_role))
+        for field in required_file_fields:
+            allowed_names = {field.field_key, f'template_field_{field.id}'}
+            if not provided_names.intersection(allowed_names):
+                missing.append(field.label)
+    else:
+        required_file_fields = FormField.objects.filter(
+            campaign=campaign,
+            is_active=True,
+            is_required=True,
+            field_type='file',
+        ).filter(Q(role__isnull=True) | Q(role=job_role))
+        for field in required_file_fields:
+            allowed_names = {field.field_key, f'field_{field.id}', f'file_{field.id}'}
+            if not provided_names.intersection(allowed_names):
+                missing.append(field.label)
 
     if missing:
         raise serializers.ValidationError(
@@ -209,21 +222,38 @@ def _document_type_from_field_name(field_name: str) -> str:
 
 
 def _get_field_fk_for_file(submission, field_name: str):
+    """
+    Returns (campaign_field_or_none, template_field_or_none).
+    Checks template_field_ prefix first, then campaign field_ / file_ prefixes.
+    """
+    if field_name.startswith('template_field_'):
+        raw_id = field_name[len('template_field_'):]
+        if raw_id.isdigit() and submission.campaign.form_template_id:
+            tmpl_field = FormTemplateField.objects.filter(
+                id=int(raw_id),
+                section__template=submission.campaign.form_template,
+                field_type='file',
+                is_active=True,
+            ).first()
+            if tmpl_field:
+                return None, tmpl_field
     for prefix in ('field_', 'file_'):
         if field_name.startswith(prefix):
             raw_id = field_name[len(prefix):]
             if raw_id.isdigit():
-                return submission.campaign.form_fields.filter(
+                campaign_field = submission.campaign.form_fields.filter(
                     id=int(raw_id), field_type='file', is_active=True,
                 ).first()
+                if campaign_field:
+                    return campaign_field, None
     field = submission.campaign.form_fields.filter(
         field_key=field_name,
         field_type='file',
         is_active=True,
     ).first()
     if field:
-        return field
-    return None
+        return field, None
+    return None, None
 
 
 # Submission creation
@@ -298,16 +328,21 @@ def create_intake_submission(validated_data: dict, request=None) -> IntakeSubmis
 
     answers_data = validated_data.get('answers', [])
     if answers_data:
-        IntakeSubmissionAnswer.objects.bulk_create([
-            IntakeSubmissionAnswer(
+        bulk_answers = []
+        for ans in answers_data:
+            campaign_field = ans.get('field')
+            tmpl_field = ans.get('template_field')
+            field_obj = campaign_field or tmpl_field
+            bulk_answers.append(IntakeSubmissionAnswer(
                 submission=submission,
-                field=ans['field'],
-                field_label_snapshot=ans['field'].label,
-                field_type_snapshot=ans['field'].field_type,
+                field=campaign_field,
+                template_field=tmpl_field,
+                field_source=ans.get('field_source', 'campaign'),
+                field_label_snapshot=field_obj.label if field_obj else '',
+                field_type_snapshot=field_obj.field_type if field_obj else '',
                 value=ans['value'],
-            )
-            for ans in answers_data
-        ])
+            ))
+        IntakeSubmissionAnswer.objects.bulk_create(bulk_answers)
 
     return submission
 
@@ -337,10 +372,12 @@ def create_intake_documents(submission: IntakeSubmission, files) -> list:
 
     documents = []
     for field_name, f in all_files:
-        form_field = _get_field_fk_for_file(submission, field_name)
+        campaign_field, tmpl_field = _get_field_fk_for_file(submission, field_name)
         doc = IntakeDocument.objects.create(
             submission=submission,
-            field=form_field,
+            field=campaign_field,
+            template_field=tmpl_field,
+            field_source='template' if tmpl_field else 'campaign',
             document_type=_document_type_from_field_name(field_name),
             file=f,
             original_filename=f.name,

@@ -9,6 +9,16 @@ from decimal import Decimal
 from django.db.models import Sum
 
 
+def build_line_item_commercial_snapshot(srr):
+    """Return master commercial values from a SiteRoleRequirement."""
+    return {
+        'wage_min': srr.wage_min,
+        'wage_max': srr.wage_max,
+        'billing_rate': srr.billing_rate,
+        'shift_hours': getattr(srr, 'shift_hours', None),
+    }
+
+
 _ACTIVE_DEMAND_STATUSES = (
     'submitted',
     'hr_review',
@@ -139,6 +149,11 @@ def check_mrf_readiness(mrf):
                     f'{available} headcount available '
                     f'(approved {srr.approved_headcount}, already allocated {already_allocated}).'
                 )
+
+        if any(li.commercial_override_enabled for li in line_items):
+            warnings.append(
+                'One or more line items override configured commercial values.'
+            )
 
         if mrf.budget_plan_id:
             bp = mrf.budget_plan

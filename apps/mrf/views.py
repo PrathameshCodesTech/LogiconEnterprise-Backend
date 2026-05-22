@@ -91,17 +91,24 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
             raise PermissionDenied("You do not have access to this site.")
 
     def perform_create(self, serializer):
+        from apps.access.capabilities import is_client_facing_user
         site = serializer.validated_data['site']
         self._check_site_scope(site)
         extra = {}
         if serializer.validated_data.get('requesting_department') is None:
             extra['requesting_department'] = getattr(self.request.user, 'department', None)
+        if is_client_facing_user(self.request.user):
+            extra['requested_by_type'] = 'client'
         serializer.save(org=site.org, requested_by=self.request.user, **extra)
 
     def perform_update(self, serializer):
+        from apps.access.capabilities import is_client_facing_user
         site = serializer.validated_data.get('site', serializer.instance.site)
         self._check_site_scope(site)
-        serializer.save()
+        extra = {}
+        if is_client_facing_user(self.request.user):
+            extra['requested_by_type'] = 'client'
+        serializer.save(**extra)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -173,16 +180,39 @@ class MRFLineItemViewSet(ScopedModelViewSet):
         ).exists():
             raise PermissionDenied("You do not have access to this MRF.")
 
+    def _apply_commercial_extras(self, serializer, extra, srr, mrf):
+        """Populate master snapshots and override audit fields into extra."""
+        from apps.mrf.services import build_line_item_commercial_snapshot
+        from django.utils import timezone
+
+        if srr:
+            snapshot = build_line_item_commercial_snapshot(srr)
+            extra['master_wage_min_snapshot'] = snapshot['wage_min']
+            extra['master_wage_max_snapshot'] = snapshot['wage_max']
+            extra['master_billing_rate_snapshot'] = snapshot['billing_rate']
+            extra['master_shift_hours_snapshot'] = snapshot['shift_hours']
+            if serializer.validated_data.get('wage_min_requested') is None:
+                extra['min_wage_snapshot'] = snapshot['wage_min']
+            if serializer.validated_data.get('billing_rate_snapshot') is None and snapshot['billing_rate'] is not None:
+                extra['billing_rate_snapshot'] = snapshot['billing_rate']
+
+        override_result = getattr(serializer, '_override_result', None)
+        if override_result and override_result.get('in_payload'):
+            if override_result['detected']:
+                extra['commercial_override_enabled'] = True
+                extra['commercial_overridden_by'] = override_result['user']
+                extra['commercial_overridden_at'] = timezone.now()
+            else:
+                extra['commercial_override_enabled'] = False
+                extra['commercial_overridden_by'] = None
+                extra['commercial_overridden_at'] = None
+
     def perform_create(self, serializer):
         mrf = serializer.validated_data['mrf']
         self._check_mrf_scope(mrf)
         srr = serializer.validated_data.get('site_role_requirement')
         extra = {}
-        if srr:
-            if serializer.validated_data.get('wage_min_requested') is None:
-                extra['min_wage_snapshot'] = srr.wage_min
-            if serializer.validated_data.get('billing_rate_snapshot') is None and srr.billing_rate is not None:
-                extra['billing_rate_snapshot'] = srr.billing_rate
+        self._apply_commercial_extras(serializer, extra, srr, mrf)
         # Auto-inherit MRF budget when not explicitly provided
         if serializer.validated_data.get('budget_plan') is None and mrf.budget_plan_id:
             extra['budget_plan'] = mrf.budget_plan
@@ -191,7 +221,12 @@ class MRFLineItemViewSet(ScopedModelViewSet):
     def perform_update(self, serializer):
         mrf = serializer.validated_data.get('mrf', serializer.instance.mrf)
         self._check_mrf_scope(mrf)
-        serializer.save()
+        srr = serializer.validated_data.get(
+            'site_role_requirement', serializer.instance.site_role_requirement
+        )
+        extra = {}
+        self._apply_commercial_extras(serializer, extra, srr, mrf)
+        serializer.save(**extra)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

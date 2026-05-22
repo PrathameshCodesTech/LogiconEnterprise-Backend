@@ -36,10 +36,11 @@ class SubmissionThrottle(AnonRateThrottle):
 def _get_active_campaign(token: str) -> QRCampaign:
     try:
         campaign = QRCampaign.objects.select_related(
-            'site', 'org',
+            'site', 'org', 'form_template',
         ).prefetch_related(
             'campaign_job_roles__job_role',
             'form_fields',
+            'form_template__sections__template_fields',
         ).get(token=token)
     except QRCampaign.DoesNotExist:
         raise NotFound("Campaign not found or inactive.")

@@ -345,6 +345,14 @@ def _serialize_mrf_line_item_drawer(li):
         'billing_rate_snapshot': _decimal_str(li.billing_rate_snapshot),
         'budget_plan': li.budget_plan_id,
         'budget_plan_name': bp.name if bp else None,
+        'master_wage_min_snapshot': _decimal_str(li.master_wage_min_snapshot),
+        'master_wage_max_snapshot': _decimal_str(li.master_wage_max_snapshot),
+        'master_billing_rate_snapshot': _decimal_str(li.master_billing_rate_snapshot),
+        'commercial_override_enabled': li.commercial_override_enabled,
+        'commercial_override_reason': li.commercial_override_reason or '',
+        'commercial_overridden_at': (
+            li.commercial_overridden_at.isoformat() if li.commercial_overridden_at else None
+        ),
     }
 
 
