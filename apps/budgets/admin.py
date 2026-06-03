@@ -5,10 +5,11 @@ from .models import BudgetPlan, BudgetReservation
 
 @admin.register(BudgetPlan)
 class BudgetPlanAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'budget_nature', 'budget_type', 'client', 'site', 'department', 'amount', 'currency', 'status', 'is_active']
-    list_filter = ['budget_nature', 'budget_type', 'status', 'is_active', 'org']
+    list_display = ['name', 'code', 'budget_nature', 'budget_type', 'source_type', 'client', 'site', 'department', 'amount', 'currency', 'status', 'is_active']
+    list_filter = ['budget_nature', 'budget_type', 'source_type', 'status', 'is_active', 'org']
     search_fields = ['name', 'code', 'client__name', 'site__name', 'department__name']
     raw_id_fields = ['org', 'client', 'site', 'department', 'created_by', 'updated_by']
+    readonly_fields = ['source_type', 'source_sales_lead', 'source_proposal_version']
 
 
 @admin.register(BudgetReservation)

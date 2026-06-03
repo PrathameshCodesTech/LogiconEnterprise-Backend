@@ -244,6 +244,7 @@ class CandidateMatchResult(models.Model):
     skill_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     experience_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     location_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    availability_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     industry_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     education_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     salary_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)

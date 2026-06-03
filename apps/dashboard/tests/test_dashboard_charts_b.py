@@ -32,7 +32,7 @@ from apps.budgets.models import BudgetPlan, BudgetReservation
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest
-from apps.onboarding.models import ClientOnboardingRequest
+from apps.mobilisation.models import MobilisationSetupRequest
 from apps.sites.models import Client, SiteProfile
 from apps.talent.models import Candidate, CandidateSkill
 
@@ -170,22 +170,19 @@ class TestOnboardingCharts(DashboardBase):
         """charts.by_status and by_finalization match expected counts."""
         # 2 in_review, 1 approved, 1 finalized, 1 failed finalization
         for _ in range(2):
-            ClientOnboardingRequest.objects.create(
+            MobilisationSetupRequest.objects.create(
                 org=self.org, requested_by=self.admin_user,
-                onboarding_type='new_client',
-                proposed_client_name='Corp A', proposed_client_code='corp-a',
+                mobilisation_type='new_client',
                 status='in_review',
             )
-        ob_approved = ClientOnboardingRequest.objects.create(
+        ob_approved = MobilisationSetupRequest.objects.create(
             org=self.org, requested_by=self.admin_user,
-            onboarding_type='new_client',
-            proposed_client_name='Corp B', proposed_client_code='corp-b',
+            mobilisation_type='new_client',
             status='approved', finalization_status='finalized',
         )
-        ob_failed = ClientOnboardingRequest.objects.create(
+        ob_failed = MobilisationSetupRequest.objects.create(
             org=self.org, requested_by=self.admin_user,
-            onboarding_type='new_client',
-            proposed_client_name='Corp C', proposed_client_code='corp-c',
+            mobilisation_type='new_client',
             status='approved', finalization_status='failed',
         )
 
@@ -341,10 +338,9 @@ class TestRecentActivityEnhanced(DashboardBase):
     def test_B12_recent_activity_includes_url_target_type_target_id_subtitle(self):
         """Every recent_activity item has url, target_type, target_id, subtitle."""
         self._make_mrf(status='submitted')
-        ClientOnboardingRequest.objects.create(
+        MobilisationSetupRequest.objects.create(
             org=self.org, requested_by=self.admin_user,
-            onboarding_type='new_client',
-            proposed_client_name='Activity Corp', proposed_client_code='act-corp-b',
+            mobilisation_type='new_client',
             status='draft',
         )
 
@@ -371,11 +367,11 @@ class TestRecentActivityEnhanced(DashboardBase):
             self.assertEqual(item['target_type'], 'mrf')
             self.assertTrue(item['url'].startswith('/mrf/'))
 
-        # Onboarding items: target_type = 'client_onboarding', url starts with /client-onboarding/
-        ob_items = [i for i in activity if i['type'] == 'onboarding']
+        # Mobilisation items: target_type = 'mobilisation', url starts with /mobilisation/
+        ob_items = [i for i in activity if i['type'] == 'mobilisation']
         for item in ob_items:
-            self.assertEqual(item['target_type'], 'client_onboarding')
-            self.assertTrue(item['url'].startswith('/client-onboarding/'))
+            self.assertEqual(item['target_type'], 'mobilisation')
+            self.assertTrue(item['url'].startswith('/mobilisation/'))
 
 
 # ─── Test B13: Drilldown URL stability ───────────────────────────────────────
@@ -399,7 +395,7 @@ class TestDrilldownURLs(DashboardBase):
         ob_dl = sections['onboarding']['drilldowns']
         for key in ('all', 'draft', 'in_review', 'approved', 'rejected', 'finalization_failed'):
             self.assertIn(key, ob_dl, f"Onboarding drilldowns missing key: {key}")
-        self.assertEqual(ob_dl['all'], '/client-onboarding')
+        self.assertEqual(ob_dl['all'], '/mobilisation')
 
         # Budget drilldowns
         budget_dl = sections['budget']['drilldowns']

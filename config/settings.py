@@ -55,13 +55,15 @@ LOCAL_APPS = [
     'apps.intake',
     'apps.talent',
     'apps.mrf',
-    'apps.onboarding',
+    'apps.mobilisation',
     'apps.workflow',
+    'apps.notifications',
     'apps.audit',
     'apps.hiring',
     'apps.deployment',
     'apps.budgets',
     'apps.dashboard',
+    'apps.sales',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -214,3 +216,17 @@ SIMPLE_JWT = {
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
 }
+
+# ─── Celery ────────────────────────────────────────────────────────────────────
+# Default broker is in-memory so local dev/tests work without Redis.
+# Override CELERY_BROKER_URL in production .env to use Redis/RabbitMQ.
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='memory://')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379/1')
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TIMEZONE = TIME_ZONE
+# We track resume status in the DB — never need Celery result storage.
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_ALWAYS_EAGER = config('CELERY_TASK_ALWAYS_EAGER', default=False, cast=bool)
+CELERY_TASK_EAGER_PROPAGATES = config('CELERY_TASK_ALWAYS_EAGER', default=False, cast=bool)

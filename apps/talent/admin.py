@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     Candidate, Resume, CandidateSkill,
     ParsedResume, CandidateExperience, CandidateEducation,
+    TalentResumeReview,
 )
 
 
@@ -86,3 +87,18 @@ class CandidateEducationAdmin(admin.ModelAdmin):
     search_fields = ['degree', 'institute', 'candidate__first_name', 'candidate__last_name']
     readonly_fields = ['created_at', 'updated_at']
     raw_id_fields = ['candidate', 'source_resume']
+
+
+@admin.register(TalentResumeReview)
+class TalentResumeReviewAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'resume', 'candidate', 'reviewed_by',
+        'review_type', 'previous_status', 'new_status', 'created_at',
+    ]
+    search_fields = [
+        'candidate__first_name', 'candidate__last_name',
+        'resume__original_filename', 'review_note',
+    ]
+    list_filter = ['review_type', 'previous_status', 'new_status']
+    readonly_fields = ['created_at']
+    raw_id_fields = ['org', 'resume', 'candidate', 'reviewed_by']

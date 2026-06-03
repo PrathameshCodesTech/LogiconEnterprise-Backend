@@ -1,7 +1,7 @@
 """
 apps/workflow/views.py
 
-MRF + Client Onboarding workflow API views.
+MRF + Mobilisation workflow API views.
 """
 
 from django.db.models import Q, Prefetch
@@ -40,30 +40,42 @@ def _get_mrf_or_404(user, mrf_id):
 
 
 def _onboarding_qs_for_user(user):
-    """Return ClientOnboardingRequest queryset scoped to what this user can access."""
-    from apps.onboarding.models import ClientOnboardingRequest
-    from apps.access.querysets import filter_onboarding_requests_for_user
-    return filter_onboarding_requests_for_user(ClientOnboardingRequest.objects.all(), user)
+    """Return MobilisationSetupRequest queryset scoped to what this user can access."""
+    from apps.mobilisation.models import MobilisationSetupRequest
+    from apps.access.querysets import filter_mobilisation_requests_for_user
+    return filter_mobilisation_requests_for_user(MobilisationSetupRequest.objects.all(), user)
 
 
 def _get_onboarding_or_404(user, onboarding_id):
-    """Fetch a single onboarding request the user has scope access to, or 404."""
+    """Fetch a single mobilisation request the user has scope access to, or 404."""
     return get_object_or_404(_onboarding_qs_for_user(user), pk=onboarding_id)
+
+
+def _proposal_version_qs_for_user(user):
+    """Return ProposalVersion queryset scoped to what this user can access."""
+    from apps.sales.models import ProposalVersion
+    from apps.sales.querysets import filter_proposal_versions_for_user
+    return filter_proposal_versions_for_user(ProposalVersion.objects.all(), user)
+
+
+def _get_proposal_version_or_404(user, proposal_version_id):
+    """Fetch a single proposal version the user has scope access to, or 404."""
+    return get_object_or_404(_proposal_version_qs_for_user(user), pk=proposal_version_id)
 
 
 def _workflow_instance_qs_for_user(user):
     """
     Return WorkflowInstance queryset filtered by scope.
-    Covers both MRF-linked and onboarding-linked instances.
+    Covers both MRF-linked and mobilisation-linked instances.
     Superusers see all.
     """
     from .models import WorkflowInstance
-    from apps.access.querysets import filter_mrfs_for_user, filter_onboarding_requests_for_user
+    from apps.access.querysets import filter_mrfs_for_user, filter_mobilisation_requests_for_user
     from apps.mrf.models import ManpowerRequest
-    from apps.onboarding.models import ClientOnboardingRequest
+    from apps.mobilisation.models import MobilisationSetupRequest
 
     qs = WorkflowInstance.objects.select_related(
-        'org', 'mrf', 'client_onboarding_request', 'template', 'initiated_by',
+        'org', 'mrf', 'client_onboarding_request', 'proposal_version', 'template', 'initiated_by',
     ).prefetch_related(
         'steps__step_template',
         'steps__assigned_user',
@@ -82,12 +94,19 @@ def _workflow_instance_qs_for_user(user):
         .values_list('id', flat=True)
     )
     accessible_onboarding_ids = (
-        filter_onboarding_requests_for_user(ClientOnboardingRequest.objects.only('id'), user)
+        filter_mobilisation_requests_for_user(MobilisationSetupRequest.objects.only('id'), user)
+        .values_list('id', flat=True)
+    )
+    from apps.sales.models import ProposalVersion
+    from apps.sales.querysets import filter_proposal_versions_for_user
+    accessible_proposal_ids = (
+        filter_proposal_versions_for_user(ProposalVersion.objects.only('id'), user)
         .values_list('id', flat=True)
     )
     return qs.filter(
         Q(mrf_id__in=accessible_mrf_ids) |
-        Q(client_onboarding_request_id__in=accessible_onboarding_ids)
+        Q(client_onboarding_request_id__in=accessible_onboarding_ids) |
+        Q(proposal_version_id__in=accessible_proposal_ids)
     )
 
 
@@ -113,6 +132,9 @@ def _my_tasks_steps_queryset(user, see_all_active_for_superuser):
             'workflow__mrf__required_department',
             'workflow__client_onboarding_request',
             'workflow__client_onboarding_request__client',
+            'workflow__proposal_version',
+            'workflow__proposal_version__lead',
+            'workflow__proposal_version__lead__sales_person',
             'assigned_user',
             'assigned_department',
         )
@@ -146,8 +168,12 @@ def _my_tasks_steps_queryset(user, see_all_active_for_superuser):
         )
         if org_id else Q(pk__in=[])
     )
+    sales_proposal_org_q = (
+        Q(workflow__proposal_version__lead__org_id=org_id)
+        if org_id else Q(pk__in=[])
+    )
     return qs.filter(
-        mrf_site_q | mrf_client_q | onboarding_client_q | onboarding_no_client_q
+        mrf_site_q | mrf_client_q | onboarding_client_q | onboarding_no_client_q | sales_proposal_org_q
     ).distinct()
 
 
@@ -158,13 +184,11 @@ def _my_task_detail_base_queryset(user):
     """
     from .models import WorkflowStepInstance, WorkflowAction
     from apps.mrf.models import MRFLineItem
-    from apps.onboarding.models import (
-        ClientOnboardingProposedSite,
-        ClientOnboardingProposedDepartment,
-        ClientOnboardingProposedSiteRoleRequirement,
-        ClientOnboardingProposedBudget,
-        ClientOnboardingProposedUser,
+    from apps.mobilisation.models import (
+        MobilisationProposedDepartment,
+        MobilisationProposedUser,
     )
+    from apps.sales.models import ProposalBudgetLine, ProposalBreakupLine
 
     scoped_active_wf = _workflow_instance_qs_for_user(user).filter(status='active')
     qs = WorkflowStepInstance.objects.filter(
@@ -182,20 +206,17 @@ def _my_task_detail_base_queryset(user):
     line_children = MRFLineItem.objects.order_by('pk').select_related(
         'job_role', 'wage_category', 'budget_plan', 'site_role_requirement',
     )
-    proposed_sites_children = ClientOnboardingProposedSite.objects.order_by('pk').select_related(
-        'location_area',
+    proposed_depts_children = MobilisationProposedDepartment.objects.order_by('pk').select_related(
+        'real_site',
     )
-    proposed_depts_children = ClientOnboardingProposedDepartment.objects.order_by('pk').select_related(
-        'proposed_site',
+    proposed_user_children = MobilisationProposedUser.objects.order_by('pk').select_related(
+        'access_role', 'real_site',
     )
-    proposed_srr_children = ClientOnboardingProposedSiteRoleRequirement.objects.order_by('pk').select_related(
-        'proposed_site', 'proposed_department', 'job_role', 'wage_category',
+    budget_line_children = ProposalBudgetLine.objects.order_by('sort_order', 'pk').select_related(
+        'job_role', 'site',
     )
-    proposed_budget_children = ClientOnboardingProposedBudget.objects.order_by('pk').select_related(
-        'proposed_site', 'proposed_department',
-    )
-    proposed_user_children = ClientOnboardingProposedUser.objects.order_by('pk').select_related(
-        'access_role', 'proposed_site',
+    breakup_line_children = ProposalBreakupLine.objects.order_by('sort_order', 'pk').select_related(
+        'job_role', 'site',
     )
 
     return qs.select_related(
@@ -213,7 +234,10 @@ def _my_task_detail_base_queryset(user):
         'workflow__client_onboarding_request__client',
         'workflow__client_onboarding_request__requested_by',
         'workflow__client_onboarding_request__budget_plan',
-        'workflow__client_onboarding_request__created_client',
+        'workflow__proposal_version',
+        'workflow__proposal_version__lead',
+        'workflow__proposal_version__lead__sales_person',
+        'workflow__proposal_version__created_by',
         'assigned_user',
         'assigned_department',
     ).prefetch_related(
@@ -221,25 +245,22 @@ def _my_task_detail_base_queryset(user):
         Prefetch('workflow__audit_trail', queryset=audit_children),
         Prefetch('workflow__mrf__line_items', queryset=line_children),
         Prefetch(
-            'workflow__client_onboarding_request__proposed_sites',
-            queryset=proposed_sites_children,
-        ),
-        Prefetch(
             'workflow__client_onboarding_request__proposed_departments',
             queryset=proposed_depts_children,
-        ),
-        Prefetch(
-            'workflow__client_onboarding_request__proposed_role_requirements',
-            queryset=proposed_srr_children,
-        ),
-        Prefetch(
-            'workflow__client_onboarding_request__proposed_budgets',
-            queryset=proposed_budget_children,
         ),
         Prefetch(
             'workflow__client_onboarding_request__proposed_users',
             queryset=proposed_user_children,
         ),
+        Prefetch(
+            'workflow__proposal_version__budget_lines',
+            queryset=budget_line_children,
+        ),
+        Prefetch(
+            'workflow__proposal_version__breakup_lines',
+            queryset=breakup_line_children,
+        ),
+        Prefetch('workflow__proposal_version__client_responses'),
     )
 
 
@@ -260,9 +281,14 @@ class AvailableRoutesView(APIView):
         from .services import get_available_approval_routes, build_approval_route_preview
 
         trigger_type = request.query_params.get('trigger_type', '')
-        if trigger_type not in ('mrf', 'client_onboarding'):
+        if trigger_type not in ('mrf', 'client_onboarding', 'sales_proposal'):
             return Response(
-                {'detail': 'trigger_type must be "mrf" or "client_onboarding".'},
+                {
+                    'detail': (
+                        'trigger_type must be "mrf", "client_onboarding" (mobilisation), '
+                        'or "sales_proposal".'
+                    ),
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -433,21 +459,21 @@ class MRFWorkflowConfigCheckView(APIView):
         })
 
 
-# ─── Client Onboarding Workflow Views ─────────────────────────────────────────
+# ─── Mobilisation workflow views (trigger_type client_onboarding) ─────────────
 
 class StartClientOnboardingWorkflowView(APIView):
-    """POST /api/workflow/client-onboarding/{id}/start/"""
+    """POST /api/workflow/client-onboarding/{id}/start/ — mobilisation setup workflow."""
     permission_classes = [IsAuthenticated, HasCapability]
     required_capability = 'workflow.start_workflow'
 
     def post(self, request, onboarding_id):
         from .services import start_client_onboarding_workflow
         from .models import ApprovalRoute
-        from apps.onboarding.services import check_onboarding_readiness
+        from apps.mobilisation.services import check_mobilisation_readiness
 
         onboarding_request = _get_onboarding_or_404(request.user, onboarding_id)
 
-        ok, errors, _ = check_onboarding_readiness(onboarding_request)
+        ok, errors, _ = check_mobilisation_readiness(onboarding_request)
         if not ok:
             return Response(
                 {'detail': 'Onboarding setup is incomplete.', 'errors': errors},
@@ -480,7 +506,7 @@ class ClientOnboardingWorkflowConfigCheckView(APIView):
     """
     GET /api/workflow/client-onboarding/{id}/config-check/
 
-    Dry-run config check for the client_onboarding workflow.
+    Dry-run config check for the mobilisation workflow (trigger_type client_onboarding).
     Returns 200 always — check `ok` field for pass/fail.
     """
     permission_classes = [IsAuthenticated, HasAnyCapability]
@@ -558,13 +584,48 @@ class ClientOnboardingWorkflowConfigCheckView(APIView):
 
         return Response({
             'ok': len(errors) == 0,
-            'client_onboarding_request': onboarding_request.pk,
+            'mobilisation_request': onboarding_request.pk,
             'template': template_info,
             'mapping_level': mapping_level,
             'steps': steps_info,
             'errors': errors,
             'warnings': warnings,
         })
+
+
+# ─── Sales proposal workflow views (trigger_type sales_proposal) ──────────────
+
+class StartSalesProposalWorkflowView(APIView):
+    """POST /api/workflow/sales-proposals/{proposal_version_id}/start/"""
+    permission_classes = [IsAuthenticated, HasCapability]
+    required_capability = 'workflow.start_workflow'
+
+    def post(self, request, proposal_version_id):
+        from .services import start_sales_proposal_workflow
+        from .models import ApprovalRoute
+
+        proposal_version = _get_proposal_version_or_404(request.user, proposal_version_id)
+
+        approval_route = None
+        route_id = request.data.get('approval_route')
+        if route_id is not None:
+            try:
+                approval_route = ApprovalRoute.objects.get(pk=route_id)
+            except ApprovalRoute.DoesNotExist:
+                return Response(
+                    {'detail': 'Approval route not found.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        try:
+            instance = start_sales_proposal_workflow(
+                proposal_version, actor=request.user, approval_route=approval_route,
+            )
+        except WorkflowConfigurationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = WorkflowInstanceSerializer(instance, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 # ─── Shared step action views ─────────────────────────────────────────────────

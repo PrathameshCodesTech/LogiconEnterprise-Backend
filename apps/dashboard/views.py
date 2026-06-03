@@ -29,6 +29,7 @@ from apps.access.querysets import (
     filter_hiring_applications_for_user,
     filter_mrf_line_items_for_user,
     filter_mrfs_for_user,
+    filter_mobilisation_requests_for_user,
     filter_onboarding_requests_for_user,
     filter_resumes_for_user,
     filter_sites_for_user,
@@ -125,7 +126,7 @@ def _scope_section(user):
 def _my_work_section(user):
     from apps.workflow.models import WorkflowInstance, WorkflowStepInstance
     from apps.mrf.models import ManpowerRequest
-    from apps.onboarding.models import ClientOnboardingRequest
+    from apps.mobilisation.models import MobilisationSetupRequest
 
     if user.is_superuser:
         scoped_wf_ids = WorkflowInstance.objects.filter(status='active').values('id')
@@ -133,8 +134,8 @@ def _my_work_section(user):
         accessible_mrf_ids = filter_mrfs_for_user(
             ManpowerRequest.objects.only('id'), user,
         ).values_list('id', flat=True)
-        accessible_ob_ids = filter_onboarding_requests_for_user(
-            ClientOnboardingRequest.objects.only('id'), user,
+        accessible_ob_ids = filter_mobilisation_requests_for_user(
+            MobilisationSetupRequest.objects.only('id'), user,
         ).values_list('id', flat=True)
         scoped_wf_ids = WorkflowInstance.objects.filter(
             status='active',
@@ -173,10 +174,10 @@ def _my_work_section(user):
         else:
             ob = wf.client_onboarding_request
             client = ob.client if ob else None
-            target_type = 'client_onboarding'
+            target_type = 'mobilisation'
             target_title = (
-                f'Client onboarding #{ob.pk} - {client.name}'
-                if client else f'Client onboarding #{ob.pk}'
+                f'Mobilisation #{ob.pk} - {client.name}'
+                if client else f'Mobilisation #{ob.pk}'
             )
         latest_tasks.append({
             'step_id': step.pk,
@@ -273,15 +274,15 @@ def _client_overview_section(user):
 
 
 def _onboarding_section(user):
-    from apps.onboarding.models import ClientOnboardingRequest
+    from apps.mobilisation.models import MobilisationSetupRequest
 
     _drilldowns = {
-        'all': '/client-onboarding',
-        'draft': '/client-onboarding?status=draft',
-        'in_review': '/client-onboarding?status=in_review',
-        'approved': '/client-onboarding?status=approved',
-        'rejected': '/client-onboarding?status=rejected',
-        'finalization_failed': '/client-onboarding?finalization_status=failed',
+        'all': '/mobilisation',
+        'draft': '/mobilisation?status=draft',
+        'in_review': '/mobilisation?status=in_review',
+        'approved': '/mobilisation?status=approved',
+        'rejected': '/mobilisation?status=rejected',
+        'finalization_failed': '/mobilisation?finalization_status=failed',
     }
     empty = {
         'total': 0, 'draft': 0, 'in_review': 0, 'approved': 0,
@@ -289,11 +290,12 @@ def _onboarding_section(user):
         'charts': {'by_status': [], 'by_finalization': [], 'monthly_trend': []},
         'drilldowns': _drilldowns,
     }
-    if not user_has_capability(user, 'client_onboarding.read'):
+    if not (user_has_capability(user, 'mobilisation.read') or
+            user_has_capability(user, 'client_onboarding.read')):
         return empty
 
-    ob_qs = filter_onboarding_requests_for_user(
-        ClientOnboardingRequest.objects.all(), user,
+    ob_qs = filter_mobilisation_requests_for_user(
+        MobilisationSetupRequest.objects.all(), user,
     )
     counts = ob_qs.aggregate(
         total=Count('id'),
@@ -310,10 +312,10 @@ def _onboarding_section(user):
     )
 
     by_status = [
-        {'key': 'draft', 'label': 'Draft', 'count': counts['draft'], 'url': '/client-onboarding?status=draft'},
-        {'key': 'in_review', 'label': 'In review', 'count': counts['in_review'], 'url': '/client-onboarding?status=in_review'},
-        {'key': 'approved', 'label': 'Approved', 'count': counts['approved'], 'url': '/client-onboarding?status=approved'},
-        {'key': 'rejected', 'label': 'Rejected', 'count': counts['rejected'], 'url': '/client-onboarding?status=rejected'},
+        {'key': 'draft', 'label': 'Draft', 'count': counts['draft'], 'url': '/mobilisation?status=draft'},
+        {'key': 'in_review', 'label': 'In review', 'count': counts['in_review'], 'url': '/mobilisation?status=in_review'},
+        {'key': 'approved', 'label': 'Approved', 'count': counts['approved'], 'url': '/mobilisation?status=approved'},
+        {'key': 'rejected', 'label': 'Rejected', 'count': counts['rejected'], 'url': '/mobilisation?status=rejected'},
     ]
     by_finalization = [
         {'key': 'not_finalized', 'label': 'Not finalized', 'count': counts['not_finalized']},
@@ -321,7 +323,7 @@ def _onboarding_section(user):
         {
             'key': 'failed', 'label': 'Failed',
             'count': counts['finalization_failed'],
-            'url': '/client-onboarding?finalization_status=failed',
+            'url': '/mobilisation?finalization_status=failed',
         },
     ]
     monthly_trend = _build_monthly_trend(ob_qs, 'created_at')
@@ -337,8 +339,8 @@ def _onboarding_section(user):
         'recent': [
             {
                 'id': ob.pk,
-                'onboarding_type': ob.onboarding_type,
-                'client_name': ob.client.name if ob.client else (ob.proposed_client_name or ''),
+                'mobilisation_type': ob.mobilisation_type,
+                'client_name': ob.client.name if ob.client else '',
                 'status': ob.status,
                 'finalization_status': ob.finalization_status,
                 'created_at': ob.created_at,
@@ -797,17 +799,17 @@ def _recent_activity(user, mrf_section_data, ob_section_data):
         })
 
     for item in ob_section_data.get('recent', []):
-        ob_type = item.get('onboarding_type', '').replace('_', ' ').title()
+        mob_type = item.get('mobilisation_type', '').replace('_', ' ').title()
         activity.append({
-            'type': 'onboarding',
-            'target_type': 'client_onboarding',
+            'type': 'mobilisation',
+            'target_type': 'mobilisation',
             'target_id': item['id'],
             'id': item['id'],
-            'title': item.get('client_name') or f"Onboarding #{item['id']}",
-            'subtitle': ob_type,
+            'title': item.get('client_name') or f"Mobilisation #{item['id']}",
+            'subtitle': mob_type,
             'status': item['status'],
             'created_at': item['created_at'],
-            'url': f"/client-onboarding/{item['id']}",
+            'url': f"/mobilisation/{item['id']}",
         })
 
     activity.sort(key=lambda x: x['created_at'] or '', reverse=True)

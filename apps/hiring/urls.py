@@ -8,6 +8,7 @@ from .views import (
     InterviewViewSet,
     InterviewFeedbackViewSet,
     OfferViewSet,
+    ClientReviewViewSet,
 )
 
 router = DefaultRouter()
@@ -18,6 +19,7 @@ router.register('match-results', CandidateMatchResultViewSet, basename='candidat
 router.register('interviews', InterviewViewSet, basename='interview')
 router.register('interview-feedbacks', InterviewFeedbackViewSet, basename='interview-feedback')
 router.register('offers', OfferViewSet, basename='offer')
+router.register('client-review', ClientReviewViewSet, basename='client-review')
 
 urlpatterns = [
     path('', include(router.urls)),

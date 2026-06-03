@@ -7,6 +7,7 @@ from .views import (
     MRFWorkflowConfigCheckView,
     StartClientOnboardingWorkflowView,
     ClientOnboardingWorkflowConfigCheckView,
+    StartSalesProposalWorkflowView,
     MyWorkflowTasksView,
     MyWorkflowTaskDetailView,
     WorkflowInstanceDetailView,
@@ -41,7 +42,7 @@ urlpatterns = [
     path('mrf/<int:mrf_id>/start/', StartMRFWorkflowView.as_view(), name='workflow-mrf-start'),
     path('mrf/<int:mrf_id>/config-check/', MRFWorkflowConfigCheckView.as_view(), name='workflow-mrf-config-check'),
 
-    # Client onboarding workflow
+    # Mobilisation workflow (legacy URL segment client-onboarding)
     path(
         'client-onboarding/<int:onboarding_id>/start/',
         StartClientOnboardingWorkflowView.as_view(),
@@ -51,6 +52,13 @@ urlpatterns = [
         'client-onboarding/<int:onboarding_id>/config-check/',
         ClientOnboardingWorkflowConfigCheckView.as_view(),
         name='workflow-onboarding-config-check',
+    ),
+
+    # Sales proposal internal approval workflow
+    path(
+        'sales-proposals/<int:proposal_version_id>/start/',
+        StartSalesProposalWorkflowView.as_view(),
+        name='workflow-sales-proposal-start',
     ),
 
     # Shared instance endpoints

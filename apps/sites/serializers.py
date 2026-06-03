@@ -22,7 +22,9 @@ class ClientSerializer(serializers.ModelSerializer):
             'id', 'org', 'name', 'code', 'contact_name', 'contact_email',
             'contact_phone', 'industry', 'billing_address', 'gst_number',
             'scope_node', 'created_by', 'owner_sales_user',
-            'is_active', 'created_at', 'updated_at',
+            'is_active',
+            'source_type', 'source_sales_lead', 'source_proposal_version',
+            'created_at', 'updated_at',
         ]
         read_only_fields = fields
 
@@ -57,7 +59,9 @@ class SiteProfileSerializer(serializers.ModelSerializer):
             'address', 'city', 'state', 'pincode',
             'latitude', 'longitude', 'geofence_radius_meters',
             'shift_type', 'contact_person', 'contact_phone', 'contact_email',
-            'created_by', 'is_active', 'created_at', 'updated_at',
+            'created_by', 'is_active',
+            'source_type', 'source_sales_lead', 'source_proposal_version',
+            'created_at', 'updated_at',
         ]
         read_only_fields = fields
 
@@ -129,6 +133,7 @@ class SiteRoleRequirementSerializer(serializers.ModelSerializer):
             'wage_rate',
             'wage_rate_monthly_snapshot', 'wage_rate_daily_snapshot',
             'wage_rate_effective_from_snapshot', 'wage_rate_source_snapshot',
+            'source_type', 'source_sales_lead', 'source_proposal_version',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
@@ -138,6 +143,7 @@ class SiteRoleRequirementSerializer(serializers.ModelSerializer):
             'wage_rate',
             'wage_rate_monthly_snapshot', 'wage_rate_daily_snapshot',
             'wage_rate_effective_from_snapshot', 'wage_rate_source_snapshot',
+            'source_type', 'source_sales_lead', 'source_proposal_version',
             'created_at', 'updated_at',
         ]
 

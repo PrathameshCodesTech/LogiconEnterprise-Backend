@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('mrf', '0002_manpowerrequest_requesting_department_and_more'),
-        ('onboarding', '0001_initial'),
+        ('mobilisation', '0001_initial'),
         ('workflow', '0003_department_aware_workflow'),
     ]
 
@@ -20,7 +20,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='workflowinstance',
             name='client_onboarding_request',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='workflow_instances', to='onboarding.clientonboardingrequest'),
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='workflow_instances', to='mobilisation.mobilisationsetuprequest'),
         ),
         migrations.AlterField(
             model_name='stepassignmentconfig',

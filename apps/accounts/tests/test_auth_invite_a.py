@@ -19,7 +19,7 @@ Finalization invite integration:
   11. Email failure during finalization → invite_status='failed', finalization still succeeds
 
 Resend invite service:
-  12. resend_onboarding_proposed_user_invite sends email, invite_status='sent'
+  12. resend_mobilisation_proposed_user_invite sends email, invite_status='sent'
   13. resend on unfinalized proposed user raises ValueError
 
 Resend invite API action:
@@ -42,16 +42,13 @@ from apps.accounts.models import User
 from apps.accounts.services import send_user_invite_email
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
-from apps.onboarding.models import (
-    ClientOnboardingProposedSite,
-    ClientOnboardingProposedDepartment,
-    ClientOnboardingProposedSiteRoleRequirement,
-    ClientOnboardingProposedUser,
-    ClientOnboardingRequest,
+from apps.mobilisation.models import (
+    MobilisationProposedUser,
+    MobilisationSetupRequest,
 )
-from apps.onboarding.services import (
-    finalize_client_onboarding_request,
-    resend_onboarding_proposed_user_invite,
+from apps.mobilisation.services import (
+    finalize_mobilisation_request,
+    resend_mobilisation_proposed_user_invite,
 )
 from apps.sites.models import Client, SiteProfile
 from apps.workflow.models import (
@@ -139,17 +136,15 @@ class InviteBase(TestCase):
         return user
 
     def _approved_request(self, code):
-        return ClientOnboardingRequest.objects.create(
+        return MobilisationSetupRequest.objects.create(
             org=self.org,
             requested_by=self.admin,
-            onboarding_type='new_client',
-            proposed_client_name='Invite Corp',
-            proposed_client_code=code,
+            mobilisation_type='new_client',
             status='approved',
         )
 
     def _p_user(self, req, *, email, send_invite=True, full_name='Alice Smith'):
-        return ClientOnboardingProposedUser.objects.create(
+        return MobilisationProposedUser.objects.create(
             request=req,
             full_name=full_name,
             email=email,
@@ -272,7 +267,7 @@ class TestFinalizationInvite(InviteBase):
         req = self._approved_request('inv07')
         p_user = self._p_user(req, email='inv07@corp.test', send_invite=True)
 
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         p_user.refresh_from_db()
         self.assertEqual(p_user.invite_status, 'sent')
@@ -283,7 +278,7 @@ class TestFinalizationInvite(InviteBase):
         req = self._approved_request('inv08')
         self._p_user(req, email='inv08@corp.test', send_invite=True)
 
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn('inv08@corp.test', mail.outbox[0].to)
@@ -293,7 +288,7 @@ class TestFinalizationInvite(InviteBase):
         req = self._approved_request('inv09')
         self._p_user(req, email='inv09@corp.test', send_invite=True)
 
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         body = mail.outbox[0].body
         self.assertIn('/set-password?uid=', body)
@@ -304,7 +299,7 @@ class TestFinalizationInvite(InviteBase):
         req = self._approved_request('inv10')
         p_user = self._p_user(req, email='inv10@corp.test', send_invite=False)
 
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         p_user.refresh_from_db()
         self.assertEqual(p_user.invite_status, 'not_required')
@@ -320,7 +315,7 @@ class TestFinalizationInvite(InviteBase):
         req = self._approved_request('inv11')
         p_user = self._p_user(req, email='inv11@corp.test', send_invite=True)
 
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         req.refresh_from_db()
         p_user.refresh_from_db()
@@ -334,15 +329,15 @@ class TestFinalizationInvite(InviteBase):
 class TestResendInviteService(InviteBase):
 
     def test_12_resend_service_sends_email_and_sets_status_sent(self):
-        """resend_onboarding_proposed_user_invite sends email and sets invite_status='sent'."""
+        """resend_mobilisation_proposed_user_invite sends email and sets invite_status='sent'."""
         req = self._approved_request('inv12')
         p_user = self._p_user(req, email='inv12@corp.test', send_invite=False)
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         p_user.refresh_from_db()
         self.assertEqual(p_user.invite_status, 'not_required')
 
-        resend_onboarding_proposed_user_invite(p_user, actor=self.admin)
+        resend_mobilisation_proposed_user_invite(p_user, actor=self.admin)
 
         p_user.refresh_from_db()
         self.assertEqual(p_user.invite_status, 'sent')
@@ -354,7 +349,7 @@ class TestResendInviteService(InviteBase):
         p_user = self._p_user(req, email='inv13@corp.test', send_invite=True)
 
         with self.assertRaises(ValueError):
-            resend_onboarding_proposed_user_invite(p_user, actor=self.admin)
+            resend_mobilisation_proposed_user_invite(p_user, actor=self.admin)
 
 
 # ─── Tests 14–17: Resend invite API action ────────────────────────────────────
@@ -364,7 +359,7 @@ class TestResendInviteAPI(InviteBase):
 
     def _resend_url(self, req_pk, p_user_pk):
         return (
-            f'/api/onboarding/client-requests/{req_pk}'
+            f'/api/mobilisation/setup-requests/{req_pk}'
             f'/proposed-users/{p_user_pk}/resend-invite/'
         )
 
@@ -372,7 +367,7 @@ class TestResendInviteAPI(InviteBase):
         """POST resend-invite on a finalized proposed user → 200, email in outbox."""
         req = self._approved_request('inv14')
         p_user = self._p_user(req, email='inv14@corp.test', send_invite=False)
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         resp = self.api.post(self._resend_url(req.pk, p_user.pk), {}, format='json')
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -390,7 +385,7 @@ class TestResendInviteAPI(InviteBase):
         """POST resend-invite updates the proposed user's invite_status to 'sent'."""
         req = self._approved_request('inv16')
         p_user = self._p_user(req, email='inv16@corp.test', send_invite=False)
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         self.api.post(self._resend_url(req.pk, p_user.pk), {}, format='json')
 
@@ -401,7 +396,7 @@ class TestResendInviteAPI(InviteBase):
         """The uid+token embedded in the invite email can be used to set a password."""
         req = self._approved_request('inv17')
         p_user = self._p_user(req, email='inv17@corp.test', send_invite=True)
-        finalize_client_onboarding_request(req, actor=self.admin)
+        finalize_mobilisation_request(req, actor=self.admin)
 
         body = mail.outbox[0].body
         # Parse uid and token from the URL in the email body

@@ -199,6 +199,106 @@ class SiteDeployment(TimeStampedModel):
             models.Index(fields=['employee', 'status']),
             models.Index(fields=['job_role', 'status']),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee'],
+                condition=models.Q(status='active'),
+                name='unique_active_deployment_per_employee',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.employee} @ {self.site} ({self.job_role}) [{self.status}]"
+
+
+class DeploymentHistory(TimeStampedModel):
+    """
+    Append-only audit trail for employee and deployment lifecycle actions.
+
+    One row is written for each lifecycle action (activate, cancel, complete,
+    transfer in/out, suspend, reactivate, exit). `deployment` is nullable for
+    employee-level actions (suspend / reactivate / exit) and for legacy rows
+    referencing deleted deployments.
+    """
+
+    ACTION_CHOICES = [
+        ('deployment_activated',        'Deployment Activated'),
+        ('deployment_cancelled',        'Deployment Cancelled'),
+        ('deployment_completed',        'Deployment Completed'),
+        ('deployment_transferred_out',  'Deployment Transferred (Out)'),
+        ('deployment_transferred_in',   'Deployment Transferred (In)'),
+        ('employee_suspended',          'Employee Suspended'),
+        ('employee_reactivated',        'Employee Reactivated'),
+        ('employee_exited',             'Employee Exited'),
+    ]
+
+    org = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='deployment_history',
+    )
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='history',
+    )
+    deployment = models.ForeignKey(
+        SiteDeployment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='history',
+    )
+    action_type = models.CharField(max_length=40, choices=ACTION_CHOICES)
+    from_status = models.CharField(max_length=24, blank=True)
+    to_status = models.CharField(max_length=24, blank=True)
+    from_site = models.ForeignKey(
+        'sites.SiteProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    to_site = models.ForeignKey(
+        'sites.SiteProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    from_job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    to_job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    note = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Deployment History'
+        verbose_name_plural = 'Deployment History'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['employee', '-created_at']),
+            models.Index(fields=['org', 'action_type', '-created_at']),
+            models.Index(fields=['deployment', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.action_type} emp#{self.employee_id} @ {self.created_at:%Y-%m-%d %H:%M}"

@@ -29,7 +29,7 @@ from apps.budgets.models import BudgetPlan
 from apps.core.models import Department, Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest
-from apps.onboarding.models import ClientOnboardingRequest
+from apps.mobilisation.models import MobilisationSetupRequest
 from apps.sites.models import Client, SiteProfile
 from apps.workflow.models import (
     StepAssignmentConfig,
@@ -281,20 +281,18 @@ class TestOnboardingSection(DashboardBase):
 
     def test_09_onboarding_counts_respect_scope(self):
         """Onboarding requests for this org are counted; other orgs are not."""
-        ClientOnboardingRequest.objects.create(
+        MobilisationSetupRequest.objects.create(
             org=self.org, requested_by=self.admin_user,
-            onboarding_type='new_client',
-            proposed_client_name='Scoped Corp', proposed_client_code='scoped-corp',
+            mobilisation_type='new_client',
             status='in_review',
         )
         # Onboarding in other_org — should NOT be visible to admin_user
         other_admin = User.objects.create_user(username='dash_other_admin', password='pass')
         other_admin.org = self.other_org
         other_admin.save()
-        ClientOnboardingRequest.objects.create(
+        MobilisationSetupRequest.objects.create(
             org=self.other_org, requested_by=other_admin,
-            onboarding_type='new_client',
-            proposed_client_name='Other Corp', proposed_client_code='other-corp',
+            mobilisation_type='new_client',
             status='approved',
         )
 
@@ -384,10 +382,9 @@ class TestRecentActivity(DashboardBase):
         # Create an MRF in scope
         self._make_mrf(status='submitted')
         # Create an onboarding request in scope
-        ClientOnboardingRequest.objects.create(
+        MobilisationSetupRequest.objects.create(
             org=self.org, requested_by=self.admin_user,
-            onboarding_type='new_client',
-            proposed_client_name='Activity Corp', proposed_client_code='act-corp',
+            mobilisation_type='new_client',
             status='draft',
         )
 
@@ -400,6 +397,6 @@ class TestRecentActivity(DashboardBase):
         for item in activity:
             for key in ('type', 'id', 'title', 'status', 'created_at'):
                 self.assertIn(key, item, f"Missing key '{key}' in activity item")
-        # Check that only 'mrf' and 'onboarding' types appear
+        # Check that only 'mrf' and 'mobilisation' types appear
         types_seen = {item['type'] for item in activity}
-        self.assertTrue(types_seen.issubset({'mrf', 'onboarding'}))
+        self.assertTrue(types_seen.issubset({'mrf', 'mobilisation'}))

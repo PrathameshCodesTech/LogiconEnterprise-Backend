@@ -8,9 +8,11 @@ later phase.  The status transitions are the authoritative state machine.
 
 import hashlib
 import re
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from rest_framework import serializers as drf_serializers
+from rest_framework.exceptions import ValidationError
 
 from .models import Resume
 
@@ -50,9 +52,28 @@ def compute_file_hash(f) -> str:
 
 
 def queue_resume_processing(resume: Resume) -> None:
-    """Mark a resume as queued for text extraction and update its status."""
+    """
+    Check for duplicate file, then schedule background parsing via Celery.
+    Sets status='duplicate_file' and returns early if an indexed resume with
+    the same file_hash already exists.
+    """
+    if resume.file_hash:
+        duplicate = (
+            Resume.objects
+            .filter(file_hash=resume.file_hash, status='indexed')
+            .exclude(pk=resume.pk)
+            .first()
+        )
+        if duplicate:
+            Resume.objects.filter(pk=resume.pk).update(status='duplicate_file')
+            resume.status = 'duplicate_file'
+            return
+
     Resume.objects.filter(pk=resume.pk).update(status='extracting')
     resume.status = 'extracting'
+
+    from apps.talent.tasks import process_resume_task
+    process_resume_task.delay(resume.pk)
 
 
 def mark_resume_manual_review(resume: Resume, reason: str) -> None:
@@ -257,3 +278,248 @@ def manual_resume_intake(user, validated_data: dict) -> dict:
             'skills': skills_out,
             'hiring_application': hiring_app,
         }
+
+
+# ─── Review services ──────────────────────────────────────────────────────────
+
+def apply_review_service(resume, user, validated_data: dict):
+    """
+    Apply HR corrections to a resume: update candidate, replace parsed data,
+    set status=indexed, create TalentResumeReview audit record.
+    Returns the created TalentResumeReview.
+    """
+    from .models import (
+        Candidate, CandidateSkill, CandidateExperience,
+        CandidateEducation, ParsedResume, TalentResumeReview,
+    )
+
+    with transaction.atomic():
+        candidate = resume.candidate
+        previous_status = resume.status
+
+        # 1. Update candidate fields (never overwrite with blank)
+        candidate_data = validated_data.get('candidate') or {}
+        if candidate_data:
+            update_fields = []
+
+            phone_val = (candidate_data.get('phone') or '').strip()
+            if phone_val:
+                phone_normalized = normalize_phone(phone_val)
+                if candidate.phone != phone_val:
+                    candidate.phone = phone_val
+                    candidate.phone_normalized = phone_normalized
+                    update_fields.extend(['phone', 'phone_normalized'])
+
+            for field in [
+                'first_name', 'middle_name', 'last_name', 'email',
+                'current_role', 'current_company', 'current_location',
+                'total_experience_years', 'expected_ctc', 'current_ctc',
+                'notice_period_days',
+            ]:
+                val = candidate_data.get(field)
+                if val is None:
+                    continue
+                if isinstance(val, str) and not val.strip():
+                    continue
+                if field == 'total_experience_years':
+                    try:
+                        val = Decimal(str(val))
+                    except InvalidOperation:
+                        continue
+                if getattr(candidate, field, None) != val:
+                    setattr(candidate, field, val)
+                    update_fields.append(field)
+
+            if update_fields:
+                candidate.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        # 2. Replace parsed/reviewed skills — manual skills untouched
+        skills_data = validated_data.get('skills')
+        if skills_data is not None:
+            CandidateSkill.objects.filter(
+                candidate=candidate,
+                source_resume=resume,
+                source__in=['parsed', 'reviewed'],
+            ).delete()
+            for skill_d in skills_data:
+                name = skill_d['skill_name'].strip()
+                if not name:
+                    continue
+                CandidateSkill.objects.create(
+                    candidate=candidate,
+                    skill_name=name,
+                    normalized_skill_name=name.lower(),
+                    years_experience=skill_d.get('years_experience'),
+                    proficiency=skill_d.get('proficiency') or '',
+                    source='reviewed',
+                    source_resume=resume,
+                )
+
+        # 3. Replace experience for this resume
+        experience_data = validated_data.get('experience')
+        if experience_data is not None:
+            CandidateExperience.objects.filter(candidate=candidate, source_resume=resume).delete()
+            for exp_d in experience_data:
+                CandidateExperience.objects.create(
+                    candidate=candidate,
+                    source_resume=resume,
+                    job_title=exp_d.get('job_title') or '',
+                    company_name=exp_d.get('company_name') or '',
+                    industry=exp_d.get('industry') or '',
+                    start_date=exp_d.get('start_date'),
+                    end_date=exp_d.get('end_date'),
+                    is_current=bool(exp_d.get('is_current', False)),
+                    duration_months=exp_d.get('duration_months'),
+                    description=exp_d.get('description') or '',
+                    responsibilities=exp_d.get('responsibilities') or [],
+                )
+
+        # 4. Replace education for this resume
+        education_data = validated_data.get('education')
+        if education_data is not None:
+            CandidateEducation.objects.filter(candidate=candidate, source_resume=resume).delete()
+            for edu_d in education_data:
+                CandidateEducation.objects.create(
+                    candidate=candidate,
+                    source_resume=resume,
+                    degree=edu_d.get('degree') or '',
+                    specialization=edu_d.get('specialization') or '',
+                    institute=edu_d.get('institute') or '',
+                    start_year=edu_d.get('start_year'),
+                    end_year=edu_d.get('end_year'),
+                )
+
+        # 5. Upsert ParsedResume — clear errors, mark confidence 1.0
+        corrected_normalized = {}
+        if candidate_data:
+            corrected_normalized.update({
+                k: v for k, v in candidate_data.items() if k != 'phone'
+            })
+        if skills_data is not None:
+            corrected_normalized['skills'] = [
+                {
+                    'name': s['skill_name'],
+                    'normalized_name': s['skill_name'].lower(),
+                    'years_experience': str(s['years_experience']) if s.get('years_experience') is not None else None,
+                    'proficiency': s.get('proficiency') or '',
+                }
+                for s in skills_data
+            ]
+        if experience_data is not None:
+            corrected_normalized['experience'] = [
+                {k: str(v) if hasattr(v, 'isoformat') else v for k, v in e.items()}
+                for e in experience_data
+            ]
+        if education_data is not None:
+            corrected_normalized['education'] = list(education_data)
+
+        ParsedResume.objects.update_or_create(
+            resume=resume,
+            defaults={
+                'normalized_json': corrected_normalized,
+                'validation_errors': [],
+                'missing_fields': [],
+                'confidence': Decimal('1.00'),
+            },
+        )
+
+        # 6. Update resume to indexed
+        Resume.objects.filter(pk=resume.pk).update(
+            status='indexed',
+            manual_review_reason='',
+            error_message='',
+            parser_confidence=Decimal('1.00'),
+        )
+        resume.status = 'indexed'
+
+        # 7. Create audit record
+        review = TalentResumeReview.objects.create(
+            org=candidate.org,
+            resume=resume,
+            candidate=candidate,
+            reviewed_by=user,
+            review_type='correction',
+            previous_status=previous_status,
+            new_status='indexed',
+            review_note=validated_data.get('review_note', ''),
+            correction_payload={
+                k: v for k, v in validated_data.items() if k != 'review_note'
+            },
+        )
+
+    return review
+
+
+def resolve_duplicate_service(resume, user, validated_data: dict):
+    """
+    Resolve a duplicate candidate/resume situation.
+    Returns the created TalentResumeReview.
+    """
+    from .models import Candidate, TalentResumeReview
+
+    resolution = validated_data['resolution']
+    existing_candidate = validated_data.get('candidate')
+    note = validated_data.get('note', '')
+
+    with transaction.atomic():
+        candidate = resume.candidate
+        previous_status = resume.status
+
+        if resolution == 'link_existing':
+            if existing_candidate is None:
+                raise ValidationError({'candidate': 'candidate is required for link_existing resolution.'})
+            if existing_candidate.org_id != candidate.org_id:
+                raise ValidationError({'candidate': 'Target candidate belongs to a different organisation.'})
+            resume.candidate = existing_candidate
+            resume.save(update_fields=['candidate'])
+            Resume.objects.filter(pk=resume.pk).update(
+                status='manual_review',
+                manual_review_reason='Linked to existing candidate after duplicate review.',
+            )
+            resume.status = 'manual_review'
+            audit_candidate = existing_candidate
+
+        elif resolution == 'mark_duplicate':
+            update_c_fields = ['is_duplicate']
+            candidate.is_duplicate = True
+            if existing_candidate:
+                if existing_candidate.org_id != candidate.org_id:
+                    raise ValidationError({'candidate': 'Target candidate belongs to a different organisation.'})
+                candidate.duplicate_of = existing_candidate
+                update_c_fields.append('duplicate_of')
+            candidate.save(update_fields=update_c_fields)
+            Resume.objects.filter(pk=resume.pk).update(status='duplicate_file')
+            resume.status = 'duplicate_file'
+            audit_candidate = candidate
+
+        elif resolution == 'keep_separate':
+            candidate.is_duplicate = False
+            candidate.duplicate_of = None
+            candidate.save(update_fields=['is_duplicate', 'duplicate_of'])
+            if resume.status == 'duplicate_file':
+                Resume.objects.filter(pk=resume.pk).update(
+                    status='manual_review',
+                    manual_review_reason='Kept as separate candidate after duplicate review.',
+                )
+                resume.status = 'manual_review'
+            audit_candidate = candidate
+
+        else:
+            raise ValidationError({'resolution': f'Unknown resolution: {resolution}'})
+
+        review = TalentResumeReview.objects.create(
+            org=audit_candidate.org,
+            resume=resume,
+            candidate=audit_candidate,
+            reviewed_by=user,
+            review_type='duplicate_resolution',
+            previous_status=previous_status,
+            new_status=resume.status,
+            review_note=note,
+            correction_payload={
+                'resolution': resolution,
+                'candidate': existing_candidate.pk if existing_candidate else None,
+            },
+        )
+
+    return review

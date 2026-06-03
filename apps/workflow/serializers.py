@@ -83,7 +83,7 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
     class Meta:
         model = WorkflowInstance
         fields = [
-            'id', 'org', 'mrf', 'client_onboarding_request',
+            'id', 'org', 'mrf', 'client_onboarding_request', 'proposal_version',
             'template', 'template_version',
             'approval_route', 'approval_route_name_snapshot', 'approval_route_code_snapshot',
             'status', 'initiated_by', 'initiated_by_username',
@@ -122,13 +122,14 @@ class ReassignStepSerializer(serializers.Serializer):
 class WorkflowMyTaskSerializer(serializers.BaseSerializer):
     """
     Read-only shape for GET /api/workflow/my-tasks/.
-    All keys are always present; MRF-only fields are null for client_onboarding rows.
+    All keys are always present; MRF-only fields are null for mobilisation rows.
     """
 
     def to_representation(self, step):
         wf = step.workflow
         mrf = wf.mrf if wf.mrf_id else None
         onboarding = wf.client_onboarding_request if wf.client_onboarding_request_id else None
+        proposal = wf.proposal_version if wf.proposal_version_id else None
 
         if mrf is not None:
             target_type = 'mrf'
@@ -150,13 +151,33 @@ class WorkflowMyTaskSerializer(serializers.BaseSerializer):
                 line_item_count = len(mrf.line_items.all())
             else:
                 line_item_count = mrf.line_items.count()
+            target_category_label = None
+            approval_context_label = None
+        elif proposal is not None:
+            lead = proposal.lead
+            target_type = 'sales_proposal'
+            target_id = proposal.pk
+            target_title = (
+                f'Sales Proposal v{proposal.version_number} - {lead.client_name}'
+            )
+            target_status = proposal.status
+            target_url = f'/sales/proposal-versions/{proposal.pk}'
+            client_id = None
+            client_name = lead.client_name
+            site_id = None
+            site_name = None
+            requesting_department_name = None
+            required_department_name = None
+            line_item_count = None
+            target_category_label = 'Sales Proposal'
+            approval_context_label = 'Internal Proposal Approval'
         else:
-            target_type = 'client_onboarding'
+            target_type = 'mobilisation'
             target_id = onboarding.pk
             client = onboarding.client if onboarding else None
-            target_title = f'Client onboarding #{onboarding.pk} - {client.name}' if client else f'Client onboarding #{onboarding.pk}'
+            target_title = f'Mobilisation #{onboarding.pk} - {client.name}' if client else f'Mobilisation #{onboarding.pk}'
             target_status = onboarding.status
-            target_url = f'/client-onboarding/{onboarding.pk}'
+            target_url = f'/mobilisation/{onboarding.pk}'
             client_id = client.pk if client else None
             client_name = client.name if client else None
             site_id = None
@@ -164,6 +185,8 @@ class WorkflowMyTaskSerializer(serializers.BaseSerializer):
             requesting_department_name = None
             required_department_name = None
             line_item_count = None
+            target_category_label = 'Mobilisation Setup'
+            approval_context_label = 'Mobilisation Approval'
 
         dept_name = step.assigned_department_name_snapshot or None
         dept_code = step.assigned_department_code_snapshot or None
@@ -197,6 +220,8 @@ class WorkflowMyTaskSerializer(serializers.BaseSerializer):
             'requesting_department_name': requesting_department_name,
             'required_department_name': required_department_name,
             'line_item_count': line_item_count,
+            'target_category_label': target_category_label,
+            'approval_context_label': approval_context_label,
         }
 
 
@@ -249,7 +274,7 @@ def _serialize_workflow_drawer(workflow, current_step_id, steps_sorted=None, aud
         audit_sorted = sorted(list(workflow.audit_trail.all()), key=lambda a: a.created_at)
     tpl = workflow.template
     tpl_id = workflow.template_id
-    return {
+    payload = {
         'id': workflow.pk,
         'status': workflow.status,
         'template': tpl_id,
@@ -261,6 +286,10 @@ def _serialize_workflow_drawer(workflow, current_step_id, steps_sorted=None, aud
         'steps': [_compact_workflow_step(s) for s in steps_sorted],
         'audit_trail': [_compact_audit_entry(a) for a in audit_sorted],
     }
+    if workflow.client_onboarding_request_id:
+        payload['approval_label'] = 'Mobilisation Approval'
+        payload['setup_label'] = 'Mobilisation Setup'
+    return payload
 
 
 def _decimal_str(val):
@@ -367,69 +396,24 @@ def _onboarding_notes(req):
     return '\n\n'.join(blocks)
 
 
-def _serialize_proposed_site(site):
-    la = site.location_area
-    return {
-        'id': site.pk,
-        'name': site.name,
-        'code': site.code,
-        'address': site.address or '',
-        'city': site.city or '',
-        'state': site.state or '',
-        'pincode': site.pincode or '',
-        'contact_person': site.contact_person or '',
-        'contact_phone': site.contact_phone or '',
-        'contact_email': site.contact_email or '',
-        'location_area': site.location_area_id,
-        'location_area_name': la.name if la else None,
-        'is_active': site.is_active,
-    }
-
-
 def _serialize_proposed_department(dept):
-    ps = dept.proposed_site
+    rs = dept.real_site
     return {
         'id': dept.pk,
         'name': dept.name,
         'code': dept.code,
         'scope_level': dept.scope_level,
         'description': dept.description or '',
-        'proposed_site': dept.proposed_site_id,
-        'proposed_site_name': ps.name if ps else None,
+        'real_site': dept.real_site_id,
+        'real_site_name': rs.name if rs else None,
+        'real_site_code': rs.code if rs else None,
         'is_active': dept.is_active,
-    }
-
-
-def _serialize_proposed_srr(srr):
-    ps = srr.proposed_site
-    pd = srr.proposed_department
-    jr = srr.job_role
-    wc = srr.wage_category
-    return {
-        'id': srr.pk,
-        'proposed_site': srr.proposed_site_id,
-        'proposed_site_name': ps.name if ps else None,
-        'proposed_department': srr.proposed_department_id,
-        'proposed_department_name': pd.name if pd else None,
-        'job_role': srr.job_role_id,
-        'job_role_name': jr.name if jr else None,
-        'approved_headcount': srr.approved_headcount,
-        'billing_type': srr.billing_type,
-        'billing_rate': _decimal_str(srr.billing_rate),
-        'wage_min': _decimal_str(srr.wage_min),
-        'wage_max': _decimal_str(srr.wage_max),
-        'shift_hours': _decimal_str(srr.shift_hours),
-        'wage_category': srr.wage_category_id,
-        'wage_category_name': wc.name if wc else None,
-        'effective_from': srr.effective_from,
-        'effective_to': srr.effective_to,
-        'is_active': srr.is_active,
     }
 
 
 def _serialize_proposed_user(pu):
     ar = pu.access_role
-    ps = pu.proposed_site
+    rs = pu.real_site
     return {
         'id': pu.pk,
         'full_name': pu.full_name,
@@ -440,8 +424,9 @@ def _serialize_proposed_user(pu):
         'access_role_code': ar.code if ar else None,
         'access_role_name': ar.name if ar else None,
         'scope_level': pu.scope_level,
-        'proposed_site': pu.proposed_site_id,
-        'proposed_site_name': ps.name if ps else None,
+        'real_site': pu.real_site_id,
+        'real_site_name': rs.name if rs else None,
+        'real_site_code': rs.code if rs else None,
         'is_primary_contact': pu.is_primary_contact,
         'send_invite_on_finalization': pu.send_invite_on_finalization,
         'is_active': pu.is_active,
@@ -450,68 +435,121 @@ def _serialize_proposed_user(pu):
     }
 
 
-def _serialize_proposed_budget(budget):
-    ps = budget.proposed_site
-    pd = budget.proposed_department
+def _serialize_proposal_budget_line(line):
     return {
-        'id': budget.pk,
-        'name': budget.name,
-        'code': budget.code,
-        'budget_nature': budget.budget_nature,
-        'budget_type': budget.budget_type,
-        'scope_level': budget.scope_level,
-        'proposed_site': budget.proposed_site_id,
-        'proposed_site_name': ps.name if ps else None,
-        'proposed_department': budget.proposed_department_id,
-        'proposed_department_name': pd.name if pd else None,
-        'amount': _decimal_str(budget.amount),
-        'currency': budget.currency,
-        'period_start': budget.period_start,
-        'period_end': budget.period_end,
-        'notes': budget.notes or '',
-        'is_active': budget.is_active,
+        'id': line.pk,
+        'description': line.description,
+        'service_category': line.service_category or '',
+        'manpower_count': line.manpower_count,
+        'unit_cost': str(line.unit_cost),
+        'total_cost': str(line.total_cost),
+        'sort_order': line.sort_order,
+        'site_id': line.site_id,
+        'job_role_id': line.job_role_id,
+    }
+
+
+def _serialize_proposal_breakup_line(line):
+    return {
+        'id': line.pk,
+        'component_name': line.component_name,
+        'component_type': line.component_type,
+        'percentage': str(line.percentage) if line.percentage is not None else None,
+        'amount': str(line.amount),
+        'sort_order': line.sort_order,
+        'site_id': line.site_id,
+        'job_role_id': line.job_role_id,
+    }
+
+
+def _client_response_summary(proposal):
+    responses = list(proposal.client_responses.all())
+    if not responses:
+        return None
+    latest = max(responses, key=lambda r: r.created_at)
+    return {
+        'client_response': latest.client_response,
+        'client_remarks': latest.client_remarks or '',
+        'responded_at': latest.responded_at,
+        'responded_by_name': latest.responded_by_name or '',
+        'responded_by_email': latest.responded_by_email or '',
+    }
+
+
+def _serialize_sales_proposal_drawer(proposal):
+    lead = proposal.lead
+    sales_person = lead.sales_person
+    created_by = proposal.created_by
+    return {
+        'id': proposal.pk,
+        'version_number': proposal.version_number,
+        'status': proposal.status,
+        'internal_approval_status': proposal.internal_approval_status,
+        'client_approval_status': proposal.client_approval_status,
+        'grand_total': str(proposal.grand_total),
+        'manpower_total': proposal.manpower_total,
+        'management_fee_percent': (
+            str(proposal.management_fee_percent)
+            if proposal.management_fee_percent is not None else None
+        ),
+        'gst_applicable': proposal.gst_applicable,
+        'sales_remarks': proposal.sales_remarks or '',
+        'submitted_internal_at': proposal.submitted_internal_at,
+        'internally_approved_at': proposal.internally_approved_at,
+        'created_at': proposal.created_at,
+        'created_by_username': created_by.username if proposal.created_by_id else None,
+        'lead': {
+            'id': lead.pk,
+            'client_name': lead.client_name,
+            'client_contact_person': lead.client_contact_person or '',
+            'client_email': lead.client_email or '',
+            'client_phone': lead.client_phone or '',
+            'current_stage': lead.current_stage,
+        },
+        'sales_person': {
+            'id': sales_person.pk,
+            'username': sales_person.username,
+        } if lead.sales_person_id else None,
+        'client_response_summary': _client_response_summary(proposal),
     }
 
 
 def _serialize_onboarding_drawer(req):
     cl = req.client
     bp = req.budget_plan
-    cc = req.created_client
     return {
         'id': req.pk,
         'status': req.status,
-        'onboarding_type': req.onboarding_type,
+        'mobilisation_type': req.mobilisation_type,
         'client': cl.pk if cl else None,
         'client_name': cl.name if cl else None,
         'requested_by_username': (
             req.requested_by.username if req.requested_by_id else None
         ),
         'summary': req.summary or '',
-        'expected_sites_count': req.expected_site_count,
         'budget_plan': req.budget_plan_id,
         'budget_plan_name': bp.name if bp else None,
         'notes': _onboarding_notes(req),
-        'proposed_client_name': req.proposed_client_name or '',
-        'proposed_client_code': req.proposed_client_code or '',
-        'proposed_contact_name': req.proposed_contact_name or '',
-        'proposed_contact_email': req.proposed_contact_email or '',
-        'proposed_contact_phone': req.proposed_contact_phone or '',
-        'proposed_industry': req.proposed_industry or '',
-        'proposed_billing_address': req.proposed_billing_address or '',
-        'proposed_gst_number': req.proposed_gst_number or '',
         'finalization_status': req.finalization_status,
-        'created_client': cc.pk if cc else None,
-        'proposed_sites': [
-            _serialize_proposed_site(s) for s in req.proposed_sites.all()
-        ],
+        'source_sales_lead': req.source_sales_lead_id,
+        'source_sales_lead_name': (
+            req.source_sales_lead.client_name if req.source_sales_lead_id else None
+        ),
+        'source_proposal_version': req.source_proposal_version_id,
+        'source_proposal_version_number': (
+            req.source_proposal_version.version_number if req.source_proposal_version_id else None
+        ),
+        'source_proposal_grand_total': (
+            str(req.source_proposal_version.grand_total) if req.source_proposal_version_id else None
+        ),
+        'source_proposal_manpower_total': (
+            req.source_proposal_version.manpower_total if req.source_proposal_version_id else None
+        ),
+        'source_proposal_client_approval_status': (
+            req.source_proposal_version.client_approval_status if req.source_proposal_version_id else None
+        ),
         'proposed_departments': [
             _serialize_proposed_department(d) for d in req.proposed_departments.all()
-        ],
-        'proposed_role_requirements': [
-            _serialize_proposed_srr(s) for s in req.proposed_role_requirements.all()
-        ],
-        'proposed_budgets': [
-            _serialize_proposed_budget(b) for b in req.proposed_budgets.all()
         ],
         'proposed_users': [
             _serialize_proposed_user(u) for u in req.proposed_users.all()
@@ -546,11 +584,22 @@ def serialize_my_workflow_task_detail(step, request):
             'mrf': _serialize_mrf_drawer(mrf),
             'line_items': [_serialize_mrf_line_item_drawer(li) for li in line_items],
         }
+    elif wf.proposal_version_id:
+        proposal = wf.proposal_version
+        budget_lines = sorted(proposal.budget_lines.all(), key=lambda x: (x.sort_order, x.pk))
+        breakup_lines = sorted(proposal.breakup_lines.all(), key=lambda x: (x.sort_order, x.pk))
+        target_payload = {
+            'type': 'sales_proposal',
+            'sales_proposal': _serialize_sales_proposal_drawer(proposal),
+            'budget_lines': [_serialize_proposal_budget_line(bl) for bl in budget_lines],
+            'breakup_lines': [_serialize_proposal_breakup_line(bl) for bl in breakup_lines],
+            'line_items': [],
+        }
     else:
         req = wf.client_onboarding_request
         target_payload = {
-            'type': 'client_onboarding',
-            'client_onboarding': _serialize_onboarding_drawer(req),
+            'type': 'mobilisation',
+            'mobilisation': _serialize_onboarding_drawer(req),
             'line_items': [],
         }
 
@@ -566,9 +615,16 @@ def serialize_my_workflow_task_detail(step, request):
         'act_url': act_path,
     }
 
+    drawer_title = task_data['target_title']
+    if task_data.get('target_type') == 'mobilisation':
+        drawer_title = f"Mobilisation Approval — {task_data['target_title']}"
+    elif task_data.get('target_type') == 'sales_proposal':
+        drawer_title = f"Internal Proposal Approval — {task_data['target_title']}"
+
     return {
         'task': task_data,
         'workflow': workflow_data,
         'target': target_payload,
         'actions': actions,
+        'drawer_title': drawer_title,
     }

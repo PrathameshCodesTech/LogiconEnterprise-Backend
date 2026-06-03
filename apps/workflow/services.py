@@ -414,6 +414,12 @@ def start_client_onboarding_workflow(onboarding_request, actor, approval_route=N
             'This onboarding request already has an active workflow.'
         )
 
+    from apps.mobilisation.services import assert_setup_completed_for_finalization
+    try:
+        assert_setup_completed_for_finalization(onboarding_request)
+    except ValueError as exc:
+        raise WorkflowConfigurationError(str(exc)) from exc
+
     org = onboarding_request.org
     client = onboarding_request.client
 
@@ -654,6 +660,144 @@ def start_mrf_workflow(mrf, actor, approval_route=None):
     return instance
 
 
+@transaction.atomic
+def start_sales_proposal_workflow(proposal_version, actor, approval_route=None):
+    """
+    Start internal approval workflow for a sales proposal version.
+
+    Sets proposal status to submitted_internal and internal_approval_status to in_progress.
+    Org is taken from proposal_version.lead.org (org-level route/template resolution).
+    """
+    from .models import WorkflowInstance, WorkflowStepInstance, WorkflowAction
+
+    if WorkflowInstance.objects.filter(
+        proposal_version=proposal_version, status='active',
+    ).exists():
+        raise WorkflowConfigurationError(
+            'This proposal version already has an active workflow.'
+        )
+
+    if proposal_version.internal_approval_status == 'approved':
+        raise WorkflowConfigurationError(
+            'This proposal version is already internally approved.'
+        )
+
+    allowed_statuses = ('draft', 'generated', 'sales_review', 'internal_rejected')
+    if proposal_version.status not in allowed_statuses:
+        raise WorkflowConfigurationError(
+            f'Cannot start workflow from proposal status "{proposal_version.status}".'
+        )
+
+    lead = proposal_version.lead
+    org = lead.org
+
+    use_legacy = False
+    route_assignments = None
+
+    if approval_route is not None:
+        _validate_route_for_start(approval_route, org, 'sales_proposal')
+        template = approval_route.template
+        _assert_template_active(template)
+        route_assignments = _resolve_route_step_assignments(approval_route, template)
+    else:
+        approval_route, use_legacy = _select_route_or_legacy('sales_proposal', org)
+        if not use_legacy:
+            _validate_route_for_start(approval_route, org, 'sales_proposal')
+            template = approval_route.template
+            _assert_template_active(template)
+            route_assignments = _resolve_route_step_assignments(approval_route, template)
+
+    if use_legacy:
+        template = resolve_workflow_template('sales_proposal', org)
+        steps = list(template.steps.order_by('order'))
+        if not steps:
+            raise WorkflowConfigurationError(
+                f'Workflow template "{template.code}" has no steps configured.'
+            )
+        today = timezone.now().date()
+        sac_assignments = {}
+        for step in steps:
+            config = resolve_step_assignment(
+                trigger_type='sales_proposal',
+                org=org,
+                step_code=step.code,
+                on_date=today,
+            )
+            sac_assignments[step.code] = config
+    else:
+        steps = list(template.steps.order_by('order'))
+
+    instance = WorkflowInstance.objects.create(
+        org=org,
+        proposal_version=proposal_version,
+        template=template,
+        template_version=template.version,
+        status='active',
+        initiated_by=actor,
+        approval_route=approval_route if not use_legacy else None,
+        approval_route_name_snapshot=approval_route.name if (approval_route and not use_legacy) else '',
+        approval_route_code_snapshot=approval_route.code if (approval_route and not use_legacy) else '',
+    )
+
+    now = timezone.now()
+    step_instances = []
+    for step in steps:
+        if use_legacy:
+            config = sac_assignments[step.code]
+            dept = config.department
+            assigned_user = config.named_user
+        else:
+            assignment = route_assignments[step.code]
+            dept = assignment.department
+            assigned_user = assignment.named_user
+
+        step_instances.append(WorkflowStepInstance(
+            workflow=instance,
+            step_template=step,
+            step_order=step.order,
+            step_code=step.code,
+            step_name=step.name,
+            assignment_mode=step.assignment_mode,
+            actor_type=step.actor_type,
+            on_approve_next=step.on_approve_next,
+            on_reject_target=step.on_reject_target,
+            on_request_changes_target=step.on_request_changes_target,
+            requires_comment_on_reject=step.requires_comment_on_reject,
+            requires_comment_on_request_changes=step.requires_comment_on_request_changes,
+            sla_hours=step.sla_hours,
+            assigned_user=assigned_user,
+            assigned_department=dept,
+            assigned_department_name_snapshot=dept.name if dept else '',
+            assigned_department_code_snapshot=dept.code if dept else '',
+            assigned_at=now,
+            status='pending',
+        ))
+    WorkflowStepInstance.objects.bulk_create(step_instances)
+
+    first_step = instance.steps.order_by('step_order').first()
+    _activate_step(first_step)
+
+    WorkflowAction.objects.create(
+        workflow=instance,
+        step_instance=first_step,
+        actor=actor,
+        action='start',
+    )
+
+    proposal_version.status = 'submitted_internal'
+    proposal_version.internal_approval_status = 'in_progress'
+    update_fields = ['status', 'internal_approval_status', 'updated_at']
+    if not proposal_version.submitted_internal_at:
+        proposal_version.submitted_internal_at = now
+        update_fields.append('submitted_internal_at')
+    proposal_version.save(update_fields=update_fields)
+
+    lead.current_stage = 'internal_approval'
+    lead.save(update_fields=['current_stage', 'updated_at'])
+
+    return instance
+
+
 def act_on_step(step_instance, actor, action, comment=''):
     """
     Record an action (approve / reject / request_changes) on an active step.
@@ -689,11 +833,11 @@ def act_on_step(step_instance, actor, action, comment=''):
                 'A comment is required when requesting changes on this step.'
             )
 
-        # Preflight: block final approval when onboarding data has known conflicts
+        # Preflight: block final approval when mobilisation data has known conflicts
         if action == 'approve' and _is_final_onboarding_approve(step_instance):
-            from apps.onboarding.services import validate_onboarding_finalization_preflight
+            from apps.mobilisation.services import validate_mobilisation_finalization_preflight
             req = step_instance.workflow.client_onboarding_request
-            preflight_errors = validate_onboarding_finalization_preflight(req)
+            preflight_errors = validate_mobilisation_finalization_preflight(req)
             if preflight_errors:
                 raise OnboardingPreflightError(
                     'Onboarding cannot be finalized.',
@@ -772,9 +916,89 @@ def reassign_step(step_instance, actor, new_user, comment=''):
             reassign_from=old_user,
             reassign_to=new_user,
         )
+        _notify_workflow_step_assigned(step_instance, actor=actor, reassigned=True)
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
+
+def _workflow_target(workflow):
+    if workflow.mrf_id is not None:
+        return 'mrf', workflow.mrf_id, f'/mrf/{workflow.mrf_id}', f'MRF #{workflow.mrf_id}'
+    if workflow.client_onboarding_request_id is not None:
+        return (
+            'mobilisation',
+            workflow.client_onboarding_request_id,
+            f'/mobilisation/{workflow.client_onboarding_request_id}',
+            f'Mobilisation #{workflow.client_onboarding_request_id}',
+        )
+    if workflow.proposal_version_id is not None:
+        return (
+            'sales_proposal',
+            workflow.proposal_version_id,
+            f'/sales/proposals/{workflow.proposal_version_id}',
+            f'Sales proposal #{workflow.proposal_version_id}',
+        )
+    return 'workflow', workflow.pk, '/workflow/tasks', f'Workflow #{workflow.pk}'
+
+
+def _notify_workflow_step_assigned(step_instance, actor=None, reassigned=False):
+    assigned_user = step_instance.assigned_user
+    if assigned_user is None:
+        return
+    try:
+        from apps.notifications.services import create_notification
+        target_type, target_id, target_url, target_label = _workflow_target(step_instance.workflow)
+        create_notification(
+            recipient=assigned_user,
+            actor=actor or step_instance.workflow.initiated_by,
+            org=step_instance.workflow.org,
+            title=f'Workflow task assigned: {step_instance.step_name}',
+            message=f'{target_label} is waiting for your action.',
+            notification_type='workflow_task_assigned',
+            target_type=target_type,
+            target_id=target_id,
+            target_url=target_url,
+            metadata={
+                'workflow_id': step_instance.workflow_id,
+                'step_id': step_instance.pk,
+                'step_code': step_instance.step_code,
+                'reassigned': reassigned,
+            },
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            'Failed to notify workflow step assignment step_id=%s',
+            step_instance.pk,
+        )
+
+
+def _notify_workflow_completed(workflow, outcome, actor=None):
+    recipient = workflow.initiated_by
+    if recipient is None:
+        return
+    try:
+        from apps.notifications.services import create_notification
+        target_type, target_id, target_url, target_label = _workflow_target(workflow)
+        create_notification(
+            recipient=recipient,
+            actor=actor,
+            org=workflow.org,
+            title=f'{target_label} {outcome}',
+            message=f'The approval workflow was {outcome}.',
+            notification_type='workflow_completed',
+            target_type=target_type,
+            target_id=target_id,
+            target_url=target_url,
+            metadata={'workflow_id': workflow.pk, 'outcome': outcome},
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            'Failed to notify workflow completion workflow_id=%s',
+            workflow.pk,
+        )
+
 
 def _is_final_onboarding_approve(step_instance):
     """Return True if approving this step would complete a client_onboarding workflow."""
@@ -806,6 +1030,7 @@ def _activate_step(step_instance):
     if step_instance.sla_hours:
         step_instance.due_at = now + timedelta(hours=step_instance.sla_hours)
     step_instance.save(update_fields=['status', 'activated_at', 'due_at'])
+    _notify_workflow_step_assigned(step_instance)
 
 
 def _reactivate_step(step_instance):
@@ -825,6 +1050,7 @@ def _reactivate_step(step_instance):
         'status', 'activated_at', 'due_at',
         'acted_by', 'acted_at', 'action_taken', 'comment',
     ])
+    _notify_workflow_step_assigned(step_instance)
 
 
 def _reset_steps_after(step_instance):
@@ -900,6 +1126,7 @@ def _complete_workflow(workflow_instance, outcome, actor=None):
     workflow_instance.status = outcome
     workflow_instance.completed_at = now
     workflow_instance.save(update_fields=['status', 'completed_at'])
+    _notify_workflow_completed(workflow_instance, outcome, actor=actor)
 
     if workflow_instance.mrf_id is not None:
         mrf = workflow_instance.mrf
@@ -922,10 +1149,10 @@ def _complete_workflow(workflow_instance, outcome, actor=None):
             req.status = 'approved'
             req.approved_at = now
             req.save(update_fields=['status', 'approved_at', 'updated_at'])
-            from apps.onboarding.services import finalize_client_onboarding_request
-            from apps.onboarding.exceptions import OnboardingFinalizationError
+            from apps.mobilisation.services import finalize_mobilisation_request
+            from apps.mobilisation.exceptions import MobilisationFinalizationError as OnboardingFinalizationError
             try:
-                finalize_client_onboarding_request(req, actor=actor)
+                finalize_mobilisation_request(req, actor=actor)
             except OnboardingFinalizationError as exc:
                 # Finalization failure is recorded on req (finalization_status='failed',
                 # finalization_error set). Workflow approval stands; operator can retry
@@ -942,3 +1169,49 @@ def _complete_workflow(workflow_instance, outcome, actor=None):
             req.rejected_at = now
             req.save(update_fields=['status', 'rejected_at', 'updated_at'])
 
+    elif workflow_instance.proposal_version_id is not None:
+        proposal = workflow_instance.proposal_version
+        lead = proposal.lead
+        if outcome == 'approved':
+            proposal.status = 'internally_approved'
+            proposal.internal_approval_status = 'approved'
+            proposal.internally_approved_at = now
+            proposal.save(update_fields=[
+                'status', 'internal_approval_status', 'internally_approved_at', 'updated_at',
+            ])
+            lead.current_stage = 'internally_approved'
+            lead.save(update_fields=['current_stage', 'updated_at'])
+            try:
+                from apps.sales.activity import log_sales_activity
+                log_sales_activity(
+                    lead=lead,
+                    activity_type='proposal_internally_approved',
+                    title=f'Proposal v{proposal.version_number} internally approved',
+                    proposal_version=proposal,
+                    metadata={'proposal_version_id': proposal.pk},
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    'Failed to log proposal_internally_approved activity for proposal pk=%s', proposal.pk,
+                )
+        elif outcome == 'rejected':
+            proposal.status = 'internal_rejected'
+            proposal.internal_approval_status = 'rejected'
+            proposal.save(update_fields=['status', 'internal_approval_status', 'updated_at'])
+            lead.current_stage = 'sales_review'
+            lead.save(update_fields=['current_stage', 'updated_at'])
+            try:
+                from apps.sales.activity import log_sales_activity
+                log_sales_activity(
+                    lead=lead,
+                    activity_type='proposal_internal_rejected',
+                    title=f'Proposal v{proposal.version_number} rejected internally',
+                    proposal_version=proposal,
+                    metadata={'proposal_version_id': proposal.pk},
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    'Failed to log proposal_internal_rejected activity for proposal pk=%s', proposal.pk,
+                )

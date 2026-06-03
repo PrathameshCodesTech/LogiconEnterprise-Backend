@@ -44,6 +44,7 @@ class BudgetPlanSerializer(serializers.ModelSerializer):
             'status', 'notes', 'is_active',
             'created_by', 'created_by_username',
             'updated_by', 'updated_by_username',
+            'source_type', 'source_sales_lead', 'source_proposal_version',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
@@ -51,6 +52,7 @@ class BudgetPlanSerializer(serializers.ModelSerializer):
             'client_name', 'site_name', 'department_name',
             'created_by_username', 'updated_by_username',
             'reserved_amount', 'committed_amount', 'available_amount',
+            'source_type', 'source_sales_lead', 'source_proposal_version',
         ]
 
     def get_reserved_amount(self, obj):

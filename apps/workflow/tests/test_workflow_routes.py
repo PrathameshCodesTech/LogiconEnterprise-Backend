@@ -61,12 +61,11 @@ from apps.access.tests.utils import bootstrap_role_permissions
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
-from apps.onboarding.models import (
-    ClientOnboardingRequest,
-    ClientOnboardingProposedSite,
-    ClientOnboardingProposedDepartment,
-    ClientOnboardingProposedSiteRoleRequirement,
-    ClientOnboardingProposedBudget,
+from apps.mobilisation.models import (
+    MobilisationSetupRequest,
+    MobilisationProposedDepartment,
+    MobilisationProposedDepartmentRole,
+    MobilisationProposedUser,
 )
 from apps.sites.models import Client, SiteProfile, SiteRoleRequirement
 from apps.workflow.exceptions import WorkflowConfigurationError
@@ -155,9 +154,9 @@ def _mrf(org, site, requested_by, status='submitted'):
 
 
 def _onboarding(org, client, requested_by, status='draft'):
-    return ClientOnboardingRequest.objects.create(
+    return MobilisationSetupRequest.objects.create(
         org=org, client=client, requested_by=requested_by,
-        onboarding_type='new_client', status=status,
+        mobilisation_type='new_client', status=status,
     )
 
 
@@ -574,38 +573,35 @@ class TestStartOnboardingWorkflowWithRoute(RouteTestBase):
 
     def test_26_multiple_routes_no_default_no_route_given_returns_400(self):
         """Multiple routes, no default, and no route provided → API returns 400."""
-        import datetime
         tpl = _template(self.org, 'rt-ob26-tpl', trigger_type='client_onboarding')
         _step(tpl, 1, 'ob_step_a', on_approve_next='END')
         # Two routes, neither is default
         _route(self.org, 'OB Route A', 'rt-ob26a', tpl, trigger_type='client_onboarding')
         _route(self.org, 'OB Route B', 'rt-ob26b', tpl, trigger_type='client_onboarding')
 
-        # Use new_site_expansion so readiness check only requires client + proposed data.
-        req = ClientOnboardingRequest.objects.create(
+        req = MobilisationSetupRequest.objects.create(
             org=self.org, client=self.client_obj, requested_by=self.admin,
-            onboarding_type='new_site_expansion', status='draft',
+            mobilisation_type='new_client', status='setup_completed',
         )
-        ps = ClientOnboardingProposedSite.objects.create(
-            request=req, name='RT Site 26', code='rt-ps26',
-            contact_person='Alice', contact_phone='9000000026', contact_email='a@rt.local',
-            is_active=True,
+        MobilisationProposedDepartment.objects.create(
+            request=req, name='Dept 26', code='rt-pd26',
+            scope_level='client', is_active=True,
         )
-        ClientOnboardingProposedDepartment.objects.create(
-            request=req, proposed_site=ps, name='Dept 26', code='rt-pd26',
-            scope_level='site', is_active=True,
-        )
-        ClientOnboardingProposedSiteRoleRequirement.objects.create(
-            request=req, proposed_site=ps, job_role=self.job_role,
-            approved_headcount=5, billing_type='billable',
-            billing_rate='15000.00', wage_min='10000.00', wage_max='12000.00',
-            is_active=True,
-        )
-        ClientOnboardingProposedBudget.objects.create(
-            request=req, name='Budget 26', code='rt-pb26',
-            budget_nature='billable', budget_type='onboarding', scope_level='client',
-            amount='500000.00', currency='INR',
-            period_start=datetime.date.today(), is_active=True,
+        for site in self.client_obj.sites.filter(is_active=True):
+            site_dept = MobilisationProposedDepartment.objects.create(
+                request=req, name=f'{site.name} Ops', code=f'rt-pd26-{site.pk}',
+                scope_level='site', real_site=site, is_active=True,
+            )
+            for idx, srr in enumerate(site.role_requirements.filter(is_active=True), start=1):
+                MobilisationProposedDepartmentRole.objects.create(
+                    request=req,
+                    proposed_department=site_dept,
+                    site_role_requirement=srr,
+                    sort_order=idx,
+                )
+        MobilisationProposedUser.objects.create(
+            request=req, full_name='User 26', email='user26@rt.local',
+            access_role=self.role_admin, scope_level='client', is_active=True,
         )
 
         resp = self._api(self.admin).post(

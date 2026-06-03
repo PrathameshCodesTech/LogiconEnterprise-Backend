@@ -320,3 +320,33 @@ class CandidateEducation(models.Model):
 
     def __str__(self):
         return f"{self.candidate} — {self.degree} ({self.institute})"
+
+
+# ─── TalentResumeReview ───────────────────────────────────────────────────────
+
+class TalentResumeReview(models.Model):
+    """Audit record for every HR review action on a resume."""
+
+    org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='resume_reviews',
+    )
+    resume = models.ForeignKey(Resume, on_delete=models.CASCADE, related_name='reviews')
+    candidate = models.ForeignKey(Candidate, on_delete=models.CASCADE, related_name='resume_reviews')
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='resume_reviews',
+    )
+    review_type = models.CharField(max_length=32, default='correction')
+    previous_status = models.CharField(max_length=20, blank=True)
+    new_status = models.CharField(max_length=20, blank=True)
+    review_note = models.TextField(blank=True)
+    correction_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Talent Resume Review'
+        verbose_name_plural = 'Talent Resume Reviews'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Review #{self.pk} of Resume #{self.resume_id} ({self.review_type})"

@@ -7,7 +7,8 @@ Phase Talent-Manual-Intake-A: Manual resume intake endpoint.
 
 from decimal import Decimal, InvalidOperation
 
-from rest_framework import status
+from rest_framework import status as http_status
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -29,9 +30,12 @@ from apps.access.viewsets import (
     ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMixin,
 )
 
+from django.db.models import Q
+
 from .models import (
     Candidate, Resume,
     CandidateExperience, CandidateEducation, ParsedResume,
+    TalentResumeReview,
 )
 from .serializers import (
     CandidateSerializer, CandidateWriteSerializer,
@@ -40,6 +44,11 @@ from .serializers import (
     CandidateSkillSerializer,
     ParsedResumeSerializer,
     ManualResumeIntakeSerializer,
+    ResumeReviewQueueSerializer,
+    ResumeReviewDetailSerializer,
+    ResumeApplyReviewSerializer,
+    TalentResumeReviewSerializer,
+    ResumeDuplicateResolutionSerializer,
 )
 from .services import normalize_phone, compute_file_hash
 
@@ -150,6 +159,14 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
         'retrieve': RESUME_READ,
         'create': RESUME_UPLOAD,
         'partial_update': CANDIDATE_UPDATE,
+        'resume_status': RESUME_READ,
+        'reprocess': RESUME_UPLOAD,
+        'mark_reviewed': CANDIDATE_UPDATE,
+        'review_queue': RESUME_READ,
+        'review_detail': RESUME_READ,
+        'review_history': RESUME_READ,
+        'apply_review': CANDIDATE_UPDATE,
+        'resolve_duplicate': CANDIDATE_UPDATE,
     }
 
     filterset_fields = ['candidate', 'parsed_status', 'status', 'source_type']
@@ -179,6 +196,191 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
             status='uploaded',
             uploaded_by=self.request.user,
         )
+        from .services import queue_resume_processing
+        queue_resume_processing(serializer.instance)
+
+    @action(detail=True, methods=['get'], url_path='status')
+    def resume_status(self, request, pk=None):
+        """GET /api/talent/resumes/{id}/status/ — current parse status and confidence."""
+        resume = self.get_object()
+        return Response({
+            'id': resume.pk,
+            'status': resume.status,
+            'parser_confidence': (
+                float(resume.parser_confidence)
+                if resume.parser_confidence is not None else None
+            ),
+            'extraction_confidence': (
+                float(resume.extraction_confidence)
+                if resume.extraction_confidence is not None else None
+            ),
+            'error_message': resume.error_message,
+            'manual_review_reason': resume.manual_review_reason,
+        })
+
+    @action(detail=True, methods=['post'], url_path='reprocess')
+    def reprocess(self, request, pk=None):
+        """POST /api/talent/resumes/{id}/reprocess/ — re-queue an already-processed resume."""
+        resume = self.get_object()
+        override_duplicate = bool(request.data.get('override_duplicate', False))
+
+        if resume.status == 'duplicate_file':
+            if not override_duplicate:
+                raise ValidationError(
+                    {'detail': 'Cannot reprocess a duplicate-file resume. Pass override_duplicate=true to force.'}
+                )
+            if not request.user.is_superuser and CANDIDATE_UPDATE not in get_user_capabilities(request.user):
+                raise PermissionDenied('candidate.update capability is required to override duplicate status.')
+
+        previous_status = resume.status
+
+        Resume.objects.filter(pk=resume.pk).update(
+            status='extracting',
+            error_message='',
+            manual_review_reason='',
+        )
+        resume.status = 'extracting'
+
+        if previous_status in ('manual_review', 'failed'):
+            TalentResumeReview.objects.create(
+                org=resume.candidate.org,
+                resume=resume,
+                candidate=resume.candidate,
+                reviewed_by=request.user,
+                review_type='reprocess',
+                previous_status=previous_status,
+                new_status='extracting',
+                review_note=request.data.get('note', ''),
+                correction_payload={},
+            )
+
+        from .tasks import process_resume_task
+        process_resume_task.delay(resume.pk, force=True)
+        return Response({'detail': 'Reprocessing scheduled.'})
+
+    @action(detail=True, methods=['post'], url_path='mark-reviewed')
+    def mark_reviewed(self, request, pk=None):
+        """POST /api/talent/resumes/{id}/mark-reviewed/ — approve a manual_review resume."""
+        resume = self.get_object()
+        if resume.status != 'manual_review':
+            raise ValidationError(
+                {'detail': 'Only resumes with status manual_review can be marked reviewed.'}
+            )
+        if not hasattr(resume, 'parsed_resume'):
+            raise ValidationError(
+                {'detail': 'No parsed data exists; cannot mark resume as reviewed.'}
+            )
+        Resume.objects.filter(pk=resume.pk).update(status='indexed')
+        resume.status = 'indexed'
+        TalentResumeReview.objects.create(
+            org=resume.candidate.org,
+            resume=resume,
+            candidate=resume.candidate,
+            reviewed_by=request.user,
+            review_type='mark_reviewed',
+            previous_status='manual_review',
+            new_status='indexed',
+            review_note='',
+            correction_payload={},
+        )
+        return Response({'detail': 'Resume marked as reviewed and indexed.'})
+
+    @action(detail=False, methods=['get'], url_path='review-queue')
+    def review_queue(self, request):
+        """GET /api/talent/resumes/review-queue/ — resumes needing HR review."""
+        qs = self.get_queryset()
+
+        base_q = Q(status='manual_review') | Q(status='failed')
+
+        confidence_below_str = request.query_params.get('confidence_below', '').strip()
+        if confidence_below_str:
+            try:
+                threshold = float(confidence_below_str)
+                base_q |= Q(status='indexed', parser_confidence__lt=threshold)
+            except ValueError:
+                pass
+
+        qs = qs.filter(base_q)
+
+        status_filter = request.query_params.get('status', '').strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        source_type_filter = request.query_params.get('source_type', '').strip()
+        if source_type_filter:
+            qs = qs.filter(source_type=source_type_filter)
+
+        uploaded_by_filter = request.query_params.get('uploaded_by', '').strip()
+        if uploaded_by_filter:
+            qs = qs.filter(uploaded_by_id=uploaded_by_filter)
+
+        candidate_search = request.query_params.get('candidate', '').strip()
+        if candidate_search:
+            qs = qs.filter(
+                Q(candidate__first_name__icontains=candidate_search) |
+                Q(candidate__last_name__icontains=candidate_search) |
+                Q(candidate__phone__icontains=candidate_search)
+            )
+
+        uploaded_from = request.query_params.get('uploaded_from', '').strip()
+        if uploaded_from:
+            qs = qs.filter(uploaded_at__date__gte=uploaded_from)
+
+        uploaded_to = request.query_params.get('uploaded_to', '').strip()
+        if uploaded_to:
+            qs = qs.filter(uploaded_at__date__lte=uploaded_to)
+
+        reason_contains = request.query_params.get('reason_contains', '').strip()
+        if reason_contains:
+            qs = qs.filter(
+                Q(manual_review_reason__icontains=reason_contains) |
+                Q(error_message__icontains=reason_contains)
+            )
+
+        qs = qs.select_related('candidate', 'uploaded_by').prefetch_related('parsed_resume')
+        qs = qs.order_by('-uploaded_at')
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = ResumeReviewQueueSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+
+        serializer = ResumeReviewQueueSerializer(qs, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='review-detail')
+    def review_detail(self, request, pk=None):
+        """GET /api/talent/resumes/{id}/review-detail/ — full data for correction UI."""
+        resume = self.get_object()
+        serializer = ResumeReviewDetailSerializer(resume, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='apply-review')
+    def apply_review(self, request, pk=None):
+        """POST /api/talent/resumes/{id}/apply-review/ — HR correction + index."""
+        resume = self.get_object()
+        ser = ResumeApplyReviewSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        from .services import apply_review_service
+        review = apply_review_service(resume, request.user, ser.validated_data)
+        return Response(TalentResumeReviewSerializer(review).data)
+
+    @action(detail=True, methods=['get'], url_path='review-history')
+    def review_history(self, request, pk=None):
+        """GET /api/talent/resumes/{id}/review-history/ — audit log for this resume."""
+        resume = self.get_object()
+        reviews = TalentResumeReview.objects.filter(resume=resume).select_related('reviewed_by')
+        return Response(TalentResumeReviewSerializer(reviews, many=True).data)
+
+    @action(detail=True, methods=['post'], url_path='resolve-duplicate')
+    def resolve_duplicate(self, request, pk=None):
+        """POST /api/talent/resumes/{id}/resolve-duplicate/ — conservative duplicate resolution."""
+        resume = self.get_object()
+        ser = ResumeDuplicateResolutionSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        from .services import resolve_duplicate_service
+        review = resolve_duplicate_service(resume, request.user, ser.validated_data)
+        return Response(TalentResumeReviewSerializer(review).data)
 
 
 # ─── Read-only sub-resource viewsets ─────────────────────────────────────────
@@ -270,5 +472,5 @@ class ManualResumeIntakeView(APIView):
                     if result['hiring_application'] else None
                 ),
             },
-            status=status.HTTP_201_CREATED,
+            status=http_status.HTTP_201_CREATED,
         )

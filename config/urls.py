@@ -29,14 +29,16 @@ urlpatterns = [
     path('api/public/', include('apps.intake.public_urls')),
     path('api/talent/', include('apps.talent.urls')),
     path('api/mrf/', include('apps.mrf.urls')),
-    path('api/onboarding/', include('apps.onboarding.urls')),
+    path('api/mobilisation/', include('apps.mobilisation.urls')),
     path('api/workflow/', include('apps.workflow.urls')),
+    path('api/notifications/', include('apps.notifications.urls')),
     path('api/audit/', include('apps.audit.urls')),
     path('api/access/', include('apps.access.urls')),
     path('api/hiring/', include('apps.hiring.urls')),
     path('api/deployment/', include('apps.deployment.urls')),
     path('api/budgets/', include('apps.budgets.urls')),
     path('api/dashboard/', include('apps.dashboard.urls')),
+    path('api/sales/', include('apps.sales.urls')),
 ]
 
 if settings.DEBUG:

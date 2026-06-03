@@ -25,16 +25,12 @@ from apps.budgets.models import BudgetPlan
 from apps.core.models import ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import MRFLineItem
-from apps.onboarding.models import (
-    ClientOnboardingRequest,
-    ClientOnboardingProposedSite,
-    ClientOnboardingProposedDepartment,
-    ClientOnboardingProposedSiteRoleRequirement,
-    ClientOnboardingProposedBudget,
-    ClientOnboardingProposedUser,
+from apps.mobilisation.models import (
+    MobilisationSetupRequest,
+    MobilisationProposedDepartment,
+    MobilisationProposedUser,
 )
 from apps.sites.models import Client, SiteProfile
-from apps.wages.models import LocationArea, WageCategory
 from apps.workflow.models import (
     WorkflowTemplate,
     WorkflowStepTemplate,
@@ -226,19 +222,27 @@ class TestMyWorkflowTasks(WorkflowTestBase):
             client=self.client_obj, assignment_mode='named_user',
             named_user=self.hr_admin, is_active=True,
         )
-        req = ClientOnboardingRequest.objects.create(
+        req = MobilisationSetupRequest.objects.create(
             org=self.org, client=self.client_obj, requested_by=self.hr_exec,
-            onboarding_type='new_client', status='draft',
+            mobilisation_type='new_client', status='draft',
+        )
+        MobilisationProposedDepartment.objects.create(
+            request=req, name='Test Dept', code='td-tasks',
+            scope_level='client', is_active=True,
+        )
+        MobilisationProposedUser.objects.create(
+            request=req, full_name='Test User', email='tasks-user@test.local',
+            scope_level='client', access_role=self.role_admin, is_active=True,
         )
         start_client_onboarding_workflow(req, actor=self.hr_exec)
         resp = self._api(self.hr_admin).get(_my_tasks_url())
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['count'], 1)
         row = resp.data['results'][0]
-        self.assertEqual(row['target_type'], 'client_onboarding')
+        self.assertEqual(row['target_type'], 'mobilisation')
         self.assertEqual(row['target_id'], req.pk)
-        self.assertEqual(row['target_url'], f'/client-onboarding/{req.pk}')
-        self.assertIn('Client onboarding', row['target_title'])
+        self.assertEqual(row['target_url'], f'/mobilisation/{req.pk}')
+        self.assertIn('Mobilisation', row['target_title'])
         self.assertIn(self.client_obj.name, row['target_title'])
         self.assertEqual(row['client_id'], self.client_obj.pk)
         self.assertIsNone(row['site_id'])
@@ -478,11 +482,10 @@ class TestMyWorkflowTaskDetail(WorkflowTestBase):
             client=self.client_obj, assignment_mode='named_user',
             named_user=self.hr_admin, is_active=True,
         )
-        req = ClientOnboardingRequest.objects.create(
+        req = MobilisationSetupRequest.objects.create(
             org=self.org, client=self.client_obj, requested_by=self.hr_exec,
-            onboarding_type='new_client', status='draft',
+            mobilisation_type='new_client', status='draft',
             summary='Onboarding summary text',
-            expected_site_count=4,
             operations_notes='Ops note',
         )
         start_client_onboarding_workflow(req, actor=self.hr_exec)
@@ -491,12 +494,11 @@ class TestMyWorkflowTaskDetail(WorkflowTestBase):
         ).first()
         resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data['target']['type'], 'client_onboarding')
+        self.assertEqual(resp.data['target']['type'], 'mobilisation')
         self.assertEqual(resp.data['target']['line_items'], [])
-        ob = resp.data['target']['client_onboarding']
+        ob = resp.data['target']['mobilisation']
         self.assertEqual(ob['id'], req.pk)
         self.assertEqual(ob['status'], 'in_review')
-        self.assertEqual(ob['expected_sites_count'], 4)
         self.assertIn('Ops note', ob['notes'])
 
     def test_detail_superuser_can_access_assigned_others_step(self):
@@ -555,7 +557,7 @@ class TestMyWorkflowTaskDetail(WorkflowTestBase):
 class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
     """
     Tests for GET /api/workflow/my-tasks/{step_id}/ when the task is linked
-    to a client_onboarding workflow — verifies proposed setup data is present.
+    to a mobilisation workflow — verifies proposed setup data is present.
     """
 
     @classmethod
@@ -604,166 +606,48 @@ class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
     def _make_req(self, **kwargs):
         defaults = dict(
             org=self.org, client=self.client_obj, requested_by=self.hr_exec,
-            onboarding_type='new_client', status='draft',
-            proposed_client_name='Drawer Test Client',
-            proposed_client_code='dtc-001',
+            mobilisation_type='new_client', status='draft',
+            summary='Drawer test summary',
         )
         defaults.update(kwargs)
-        return ClientOnboardingRequest.objects.create(**defaults)
+        return MobilisationSetupRequest.objects.create(**defaults)
 
     # ── test_01 ──────────────────────────────────────────────────────────────
 
-    def test_01_drawer_has_proposed_client_fields(self):
-        """client_onboarding payload contains all proposed_client_* scalar fields."""
-        req = self._make_req(
-            proposed_contact_name='Jane Doe',
-            proposed_contact_email='jane@client.local',
-            proposed_contact_phone='9000000001',
-            proposed_industry='Manufacturing',
-            proposed_billing_address='123 Main St',
-            proposed_gst_number='GST123456',
-        )
+    def test_01_drawer_has_mobilisation_scalar_fields(self):
+        """mobilisation payload contains core scalar fields from the setup request."""
+        req = self._make_req(summary='Custom summary text')
         _, step = self._start_ob_workflow(req)
 
         resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
         self.assertEqual(resp.status_code, 200, resp.data)
-        ob = resp.data['target']['client_onboarding']
-        self.assertEqual(ob['proposed_client_name'], 'Drawer Test Client')
-        self.assertEqual(ob['proposed_client_code'], 'dtc-001')
-        self.assertEqual(ob['proposed_contact_name'], 'Jane Doe')
-        self.assertEqual(ob['proposed_contact_email'], 'jane@client.local')
-        self.assertEqual(ob['proposed_contact_phone'], '9000000001')
-        self.assertEqual(ob['proposed_industry'], 'Manufacturing')
-        self.assertEqual(ob['proposed_billing_address'], '123 Main St')
-        self.assertEqual(ob['proposed_gst_number'], 'GST123456')
+        self.assertEqual(resp.data['target']['type'], 'mobilisation')
+        ob = resp.data['target']['mobilisation']
+        self.assertEqual(ob['id'], req.pk)
+        self.assertEqual(ob['mobilisation_type'], 'new_client')
+        self.assertEqual(ob['client'], self.client_obj.pk)
+        self.assertEqual(ob['client_name'], self.client_obj.name)
+        self.assertEqual(ob['requested_by_username'], self.hr_exec.username)
+        self.assertEqual(ob['summary'], 'Custom summary text')
         self.assertEqual(ob['finalization_status'], 'not_finalized')
-        self.assertIsNone(ob['created_client'])
-
-    # ── test_02 ──────────────────────────────────────────────────────────────
-
-    def test_02_drawer_proposed_sites_with_location_area_name(self):
-        """proposed_sites list includes location_area_name resolved from FK."""
-        area = LocationArea.objects.create(
-            name='Mumbai Metro', code='ob-drw-mumbai', area_type='city',
-        )
-        req = self._make_req()
-        ClientOnboardingProposedSite.objects.create(
-            request=req, name='Drawer Site 1', code='drw-s1',
-            location_area=area, is_active=True,
-        )
-        _, step = self._start_ob_workflow(req)
-
-        resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        self.assertEqual(resp.status_code, 200, resp.data)
-        sites = resp.data['target']['client_onboarding']['proposed_sites']
-        self.assertEqual(len(sites), 1)
-        self.assertEqual(sites[0]['name'], 'Drawer Site 1')
-        self.assertEqual(sites[0]['location_area_name'], 'Mumbai Metro')
-        self.assertIn('is_active', sites[0])
+        self.assertIsNone(ob['source_sales_lead'])
 
     # ── test_03 ──────────────────────────────────────────────────────────────
 
-    def test_03_drawer_proposed_departments_with_site_name(self):
-        """proposed_departments list includes proposed_site_name from FK."""
+    def test_03_drawer_proposed_departments_with_real_site_name(self):
+        """proposed_departments list includes real_site_name from FK."""
         req = self._make_req()
-        site = ClientOnboardingProposedSite.objects.create(
-            request=req, name='Dept Parent Site', code='drw-s2', is_active=True,
-        )
-        ClientOnboardingProposedDepartment.objects.create(
-            request=req, proposed_site=site, name='Security Dept',
+        MobilisationProposedDepartment.objects.create(
+            request=req, real_site=self.site, name='Security Dept',
             code='drw-d1', scope_level='site', is_active=True,
         )
         _, step = self._start_ob_workflow(req)
 
         resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        depts = resp.data['target']['client_onboarding']['proposed_departments']
+        depts = resp.data['target']['mobilisation']['proposed_departments']
         self.assertEqual(len(depts), 1)
         self.assertEqual(depts[0]['name'], 'Security Dept')
-        self.assertEqual(depts[0]['proposed_site_name'], 'Dept Parent Site')
-
-    # ── test_04 ──────────────────────────────────────────────────────────────
-
-    def test_04_drawer_proposed_srrs_with_all_display_fields(self):
-        """proposed_role_requirements includes job_role_name, site/dept names, wage_category_name."""
-        wc = WageCategory.objects.create(name='Unskilled Basic', code='ob-drw-usk')
-        req = self._make_req()
-        site = ClientOnboardingProposedSite.objects.create(
-            request=req, name='SRR Site', code='drw-s3', is_active=True,
-        )
-        dept = ClientOnboardingProposedDepartment.objects.create(
-            request=req, proposed_site=site, name='SRR Dept',
-            code='drw-d2', scope_level='site', is_active=True,
-        )
-        ClientOnboardingProposedSiteRoleRequirement.objects.create(
-            request=req, proposed_site=site, proposed_department=dept,
-            job_role=self.job_role, approved_headcount=10,
-            billing_type='billable', billing_rate='20000.00',
-            wage_min='12000.00', wage_max='16000.00',
-            wage_category=wc, is_active=True,
-        )
-        _, step = self._start_ob_workflow(req)
-
-        resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        srrs = resp.data['target']['client_onboarding']['proposed_role_requirements']
-        self.assertEqual(len(srrs), 1)
-        srr = srrs[0]
-        self.assertEqual(srr['job_role_name'], 'OB Drawer Guard')
-        self.assertEqual(srr['proposed_site_name'], 'SRR Site')
-        self.assertEqual(srr['proposed_department_name'], 'SRR Dept')
-        self.assertEqual(srr['wage_category_name'], 'Unskilled Basic')
-        self.assertEqual(srr['approved_headcount'], 10)
-        self.assertEqual(srr['billing_rate'], '20000.00')
-
-    # ── test_05 ──────────────────────────────────────────────────────────────
-
-    def test_05_drawer_proposed_budgets_with_site_and_dept_names(self):
-        """proposed_budgets includes proposed_site_name and proposed_department_name."""
-        req = self._make_req()
-        site = ClientOnboardingProposedSite.objects.create(
-            request=req, name='Budget Site', code='drw-s4', is_active=True,
-        )
-        dept = ClientOnboardingProposedDepartment.objects.create(
-            request=req, proposed_site=site, name='Budget Dept',
-            code='drw-d3', scope_level='site', is_active=True,
-        )
-        ClientOnboardingProposedBudget.objects.create(
-            request=req, name='Ops Budget', code='drw-b1',
-            budget_nature='billable', budget_type='onboarding',
-            scope_level='department',
-            proposed_site=site, proposed_department=dept,
-            amount='750000.00', currency='INR',
-            period_start=datetime.date(2026, 6, 1), is_active=True,
-        )
-        _, step = self._start_ob_workflow(req)
-
-        resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        budgets = resp.data['target']['client_onboarding']['proposed_budgets']
-        self.assertEqual(len(budgets), 1)
-        b = budgets[0]
-        self.assertEqual(b['name'], 'Ops Budget')
-        self.assertEqual(b['proposed_site_name'], 'Budget Site')
-        self.assertEqual(b['proposed_department_name'], 'Budget Dept')
-        self.assertEqual(b['amount'], '750000.00')
-
-    # ── test_06 ──────────────────────────────────────────────────────────────
-
-    def test_06_drawer_includes_inactive_proposed_records(self):
-        """Inactive proposed records are returned so approver sees the full submission."""
-        req = self._make_req()
-        ClientOnboardingProposedSite.objects.create(
-            request=req, name='Active Site', code='drw-s5a', is_active=True,
-        )
-        ClientOnboardingProposedSite.objects.create(
-            request=req, name='Inactive Site', code='drw-s5b', is_active=False,
-        )
-        _, step = self._start_ob_workflow(req)
-
-        resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        sites = resp.data['target']['client_onboarding']['proposed_sites']
-        self.assertEqual(len(sites), 2)
-        active_flags = {s['name']: s['is_active'] for s in sites}
-        self.assertTrue(active_flags['Active Site'])
-        self.assertFalse(active_flags['Inactive Site'])
+        self.assertEqual(depts[0]['real_site_name'], self.site.name)
 
     # ── test_07 ──────────────────────────────────────────────────────────────
 
@@ -794,9 +678,9 @@ class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
     # ── test_09 ──────────────────────────────────────────────────────────────
 
     def test_09_proposed_users_in_drawer(self):
-        """client_onboarding drawer contains a proposed_users list with correct base fields."""
+        """mobilisation drawer contains a proposed_users list with correct base fields."""
         req = self._make_req()
-        ClientOnboardingProposedUser.objects.create(
+        MobilisationProposedUser.objects.create(
             request=req,
             full_name='Dana Lee',
             email='dana@drawertest.com',
@@ -810,7 +694,7 @@ class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
 
         resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
         self.assertEqual(resp.status_code, 200, resp.data)
-        ob = resp.data['target']['client_onboarding']
+        ob = resp.data['target']['mobilisation']
         self.assertIn('proposed_users', ob)
         users = ob['proposed_users']
         self.assertEqual(len(users), 1)
@@ -823,30 +707,27 @@ class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
     # ── test_10 ──────────────────────────────────────────────────────────────
 
     def test_10_proposed_users_role_and_site_display_fields(self):
-        """proposed_users entries include access_role_code, access_role_name, proposed_site_name."""
+        """proposed_users entries include access_role_code, access_role_name, real_site_name."""
         req = self._make_req()
-        p_site = ClientOnboardingProposedSite.objects.create(
-            request=req, name='User Site', code='drw-us1', is_active=True,
-        )
-        ClientOnboardingProposedUser.objects.create(
+        MobilisationProposedUser.objects.create(
             request=req,
             full_name='Eve Torres',
             email='eve@drawertest.com',
             user_type='client',
             access_role=self.role_admin,
             scope_level='site',
-            proposed_site=p_site,
+            real_site=self.site,
             is_active=True,
         )
         _, step = self._start_ob_workflow(req)
 
         resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        users = resp.data['target']['client_onboarding']['proposed_users']
+        users = resp.data['target']['mobilisation']['proposed_users']
         self.assertEqual(len(users), 1)
         u = users[0]
         self.assertEqual(u['access_role_code'], self.role_admin.code)
         self.assertEqual(u['access_role_name'], self.role_admin.name)
-        self.assertEqual(u['proposed_site_name'], 'User Site')
+        self.assertEqual(u['real_site_name'], self.site.name)
         self.assertEqual(u['scope_level'], 'site')
 
     # ── test_11 ──────────────────────────────────────────────────────────────
@@ -854,12 +735,12 @@ class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
     def test_11_inactive_proposed_users_included_in_drawer(self):
         """Both active and inactive proposed users are returned so approver sees full submission."""
         req = self._make_req()
-        ClientOnboardingProposedUser.objects.create(
+        MobilisationProposedUser.objects.create(
             request=req, full_name='Active User', email='active@drawertest.com',
             user_type='client', access_role=self.role_admin,
             scope_level='client', is_active=True,
         )
-        ClientOnboardingProposedUser.objects.create(
+        MobilisationProposedUser.objects.create(
             request=req, full_name='Inactive User', email='inactive@drawertest.com',
             user_type='client', access_role=self.role_admin,
             scope_level='client', is_active=False,
@@ -867,7 +748,7 @@ class TestOnboardingTaskDrawerDetail(WorkflowTestBase):
         _, step = self._start_ob_workflow(req)
 
         resp = self._api(self.hr_admin).get(_my_task_detail_url(step.pk))
-        users = resp.data['target']['client_onboarding']['proposed_users']
+        users = resp.data['target']['mobilisation']['proposed_users']
         self.assertEqual(len(users), 2)
         active_flags = {u['email']: u['is_active'] for u in users}
         self.assertTrue(active_flags['active@drawertest.com'])

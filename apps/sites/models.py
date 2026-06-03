@@ -12,6 +12,13 @@ from django.db import models
 from apps.core.models import Organization, ScopeNode, TimeStampedModel
 
 
+SOURCE_TYPE_CHOICES = [
+    ('sales_conversion', 'Sales Conversion'),
+    ('manual_admin', 'Manual Admin'),
+    ('import', 'Import'),
+]
+
+
 class Client(TimeStampedModel):
     """A client organization that is serviced at one or more sites."""
     org = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='clients')
@@ -47,12 +54,25 @@ class Client(TimeStampedModel):
     )
     is_active = models.BooleanField(default=True)
 
+    source_type = models.CharField(
+        max_length=20, choices=SOURCE_TYPE_CHOICES, default='manual_admin',
+    )
+    source_sales_lead = models.ForeignKey(
+        'sales.SalesLead', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_clients',
+    )
+    source_proposal_version = models.ForeignKey(
+        'sales.ProposalVersion', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_clients',
+    )
+
     class Meta:
         verbose_name = 'Client'
         verbose_name_plural = 'Clients'
         unique_together = [['org', 'code']]
         indexes = [
             models.Index(fields=['org', 'scope_node']),
+            models.Index(fields=['org', 'source_type']),
         ]
         ordering = ['name']
 
@@ -108,10 +128,25 @@ class SiteProfile(TimeStampedModel):
     )
     is_active = models.BooleanField(default=True)
 
+    source_type = models.CharField(
+        max_length=20, choices=SOURCE_TYPE_CHOICES, default='manual_admin',
+    )
+    source_sales_lead = models.ForeignKey(
+        'sales.SalesLead', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_sites',
+    )
+    source_proposal_version = models.ForeignKey(
+        'sales.ProposalVersion', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_sites',
+    )
+
     class Meta:
         verbose_name = 'Site Profile'
         verbose_name_plural = 'Site Profiles'
         unique_together = [['org', 'code']]
+        indexes = [
+            models.Index(fields=['org', 'source_type']),
+        ]
         ordering = ['name']
 
     def __str__(self):
@@ -200,6 +235,18 @@ class SiteRoleRequirement(TimeStampedModel):
     wage_rate_effective_from_snapshot = models.DateField(null=True, blank=True)
     wage_rate_source_snapshot = models.CharField(max_length=255, blank=True)
 
+    source_type = models.CharField(
+        max_length=20, choices=SOURCE_TYPE_CHOICES, default='manual_admin',
+    )
+    source_sales_lead = models.ForeignKey(
+        'sales.SalesLead', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_srrs',
+    )
+    source_proposal_version = models.ForeignKey(
+        'sales.ProposalVersion', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_srrs',
+    )
+
     class Meta:
         verbose_name = 'Site Role Requirement'
         verbose_name_plural = 'Site Role Requirements'
@@ -208,6 +255,7 @@ class SiteRoleRequirement(TimeStampedModel):
             models.Index(fields=['site', 'job_role', 'is_active']),
             models.Index(fields=['site', 'department', 'job_role', 'is_active']),
             models.Index(fields=['billing_type']),
+            models.Index(fields=['source_type']),
         ]
         constraints = [
             models.UniqueConstraint(

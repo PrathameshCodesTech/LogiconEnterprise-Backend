@@ -14,6 +14,7 @@ from apps.mrf.models import ManpowerRequest, MRFLineItem
 from .models import (
     Candidate, Resume, CandidateSkill,
     ParsedResume, CandidateExperience, CandidateEducation,
+    TalentResumeReview,
 )
 
 
@@ -264,3 +265,172 @@ class ManualResumeIntakeSerializer(serializers.Serializer):
                 )
 
         return data
+
+
+# ─── Review Queue ─────────────────────────────────────────────────────────────
+
+class _CandidateQueueSummarySerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Candidate
+        fields = ['id', 'full_name', 'phone', 'email', 'lifecycle_status']
+
+
+class _ParsedResumeSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ParsedResume
+        fields = ['id', 'confidence', 'career_level', 'primary_domain', 'validation_errors', 'missing_fields']
+
+
+class ResumeReviewQueueSerializer(serializers.ModelSerializer):
+    candidate_summary = _CandidateQueueSummarySerializer(source='candidate', read_only=True)
+    parsed_resume_summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Resume
+        fields = [
+            'id', 'original_filename', 'status', 'manual_review_reason', 'error_message',
+            'parser_engine', 'parser_confidence', 'extraction_engine', 'extraction_confidence',
+            'uploaded_at', 'source_type', 'uploaded_by',
+            'candidate_summary', 'parsed_resume_summary',
+        ]
+
+    def get_parsed_resume_summary(self, obj):
+        try:
+            return _ParsedResumeSummarySerializer(obj.parsed_resume).data
+        except ParsedResume.DoesNotExist:
+            return None
+
+
+# ─── Review Detail ────────────────────────────────────────────────────────────
+
+class ResumeReviewDetailSerializer(serializers.ModelSerializer):
+    candidate = CandidateSerializer(read_only=True)
+    parsed_resume = ParsedResumeSerializer(read_only=True)
+    parsed_skills = serializers.SerializerMethodField()
+    parsed_experience = serializers.SerializerMethodField()
+    parsed_education = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Resume
+        fields = [
+            'id', 'original_filename', 'content_type', 'size_bytes',
+            'status', 'manual_review_reason', 'error_message',
+            'parser_engine', 'parser_confidence', 'extraction_engine', 'extraction_confidence',
+            'raw_text', 'cleaned_text', 'uploaded_at', 'source_type',
+            'candidate', 'parsed_resume', 'parsed_skills', 'parsed_experience', 'parsed_education',
+        ]
+
+    def get_parsed_skills(self, obj):
+        skills = obj.skills.filter(source__in=['parsed', 'reviewed'])
+        return CandidateSkillSerializer(skills, many=True).data
+
+    def get_parsed_experience(self, obj):
+        return CandidateExperienceSerializer(obj.experiences.all(), many=True).data
+
+    def get_parsed_education(self, obj):
+        return CandidateEducationSerializer(obj.educations.all(), many=True).data
+
+
+# ─── Apply Review (input) ─────────────────────────────────────────────────────
+
+class _ReviewCandidateUpdateSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    middle_name = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    current_role = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    current_company = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    current_location = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    total_experience_years = serializers.DecimalField(
+        max_digits=5, decimal_places=1, required=False, allow_null=True,
+    )
+    expected_ctc = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, allow_null=True,
+    )
+    current_ctc = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, allow_null=True,
+    )
+    notice_period_days = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+
+    def validate_phone(self, value):
+        if value:
+            from .services import normalize_phone
+            normalize_phone(value)
+        return value
+
+
+class _ReviewSkillSerializer(serializers.Serializer):
+    skill_name = serializers.CharField(max_length=128)
+    years_experience = serializers.DecimalField(
+        max_digits=4, decimal_places=1, required=False, allow_null=True,
+    )
+    proficiency = serializers.ChoiceField(
+        choices=['beginner', 'intermediate', 'advanced', 'expert'],
+        required=False, allow_blank=True, default='',
+    )
+
+
+class _ReviewExperienceSerializer(serializers.Serializer):
+    job_title = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    company_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    industry = serializers.CharField(max_length=128, required=False, allow_blank=True, default='')
+    start_date = serializers.DateField(required=False, allow_null=True, default=None)
+    end_date = serializers.DateField(required=False, allow_null=True, default=None)
+    is_current = serializers.BooleanField(required=False, default=False)
+    duration_months = serializers.IntegerField(required=False, allow_null=True, default=None)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+    responsibilities = serializers.ListField(
+        child=serializers.CharField(), required=False, default=list,
+    )
+
+
+class _ReviewEducationSerializer(serializers.Serializer):
+    degree = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    specialization = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    institute = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    start_year = serializers.IntegerField(required=False, allow_null=True, default=None)
+    end_year = serializers.IntegerField(required=False, allow_null=True, default=None)
+
+
+class ResumeApplyReviewSerializer(serializers.Serializer):
+    candidate = _ReviewCandidateUpdateSerializer(required=False)
+    skills = _ReviewSkillSerializer(many=True, required=False)
+    experience = _ReviewExperienceSerializer(many=True, required=False)
+    education = _ReviewEducationSerializer(many=True, required=False)
+    review_note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+# ─── Audit / History ──────────────────────────────────────────────────────────
+
+class TalentResumeReviewSerializer(serializers.ModelSerializer):
+    reviewed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TalentResumeReview
+        fields = [
+            'id', 'resume', 'candidate', 'reviewed_by', 'reviewed_by_name',
+            'review_type', 'previous_status', 'new_status', 'review_note',
+            'correction_payload', 'created_at',
+        ]
+        read_only_fields = ['created_at']
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            name = obj.reviewed_by.get_full_name()
+            return name or str(obj.reviewed_by)
+        return None
+
+
+# ─── Duplicate Resolution (input) ────────────────────────────────────────────
+
+class ResumeDuplicateResolutionSerializer(serializers.Serializer):
+    RESOLUTION_CHOICES = ['link_existing', 'keep_separate', 'mark_duplicate']
+
+    resolution = serializers.ChoiceField(choices=RESOLUTION_CHOICES)
+    candidate = serializers.PrimaryKeyRelatedField(
+        queryset=Candidate.objects.all(), required=False, allow_null=True, default=None,
+    )
+    note = serializers.CharField(required=False, allow_blank=True, default='')

@@ -293,6 +293,10 @@ class TestResumePoolLinkA(PoolLinkBase):
         self.assertEqual(resp.status_code, 200)
 
         results = resp.data.get('results', resp.data)
-        ids = [c['id'] for c in results]
+        # ranked=true (default) wraps each entry as {candidate: {id: ...}, score: ...}
+        if results and 'candidate' in results[0]:
+            ids = [r['candidate']['id'] for r in results]
+        else:
+            ids = [r['id'] for r in results]
         self.assertNotIn(cand_linked.pk, ids)
         self.assertIn(cand_free.pk, ids)

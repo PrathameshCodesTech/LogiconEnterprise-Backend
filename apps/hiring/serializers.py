@@ -5,7 +5,11 @@ Phase Talent-Hiring-B: read/write serializers for HiringApplication,
 PipelineStage, ApplicationStageHistory, HiringDemand, CandidateMatchResult.
 """
 
+from decimal import Decimal
+
 from rest_framework import serializers
+
+from apps.talent.models import Candidate
 
 from .models import (
     HiringApplication, Interview, InterviewFeedback, Offer,
@@ -78,6 +82,9 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
         source='current_stage.code', read_only=True, default=None,
     )
     recent_stage_history = serializers.SerializerMethodField()
+    offer_status = serializers.SerializerMethodField()
+    offered_ctc = serializers.SerializerMethodField()
+    offer_joining_date = serializers.SerializerMethodField()
 
     class Meta:
         model = HiringApplication
@@ -91,6 +98,7 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
             'client_visible', 'client_decision',
             'client_decision_by', 'client_decision_at', 'client_decision_note',
             'source_intake_submission',
+            'offer_status', 'offered_ctc', 'offer_joining_date',
             'recent_stage_history',
             'created_at', 'updated_at',
         ]
@@ -105,6 +113,26 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
             .order_by('-created_at')[:5]
         )
         return ApplicationStageHistoryBriefSerializer(history, many=True).data
+
+    def get_offer_status(self, obj):
+        try:
+            return obj.offer.status
+        except Exception:
+            return None
+
+    def get_offered_ctc(self, obj):
+        try:
+            ctc = obj.offer.offered_ctc
+            return str(ctc) if ctc is not None else None
+        except Exception:
+            return None
+
+    def get_offer_joining_date(self, obj):
+        try:
+            jd = obj.offer.joining_date
+            return str(jd) if jd is not None else None
+        except Exception:
+            return None
 
 
 class HiringApplicationCreateSerializer(serializers.ModelSerializer):
@@ -269,12 +297,170 @@ class InterviewFeedbackSerializer(serializers.ModelSerializer):
 
 
 class OfferSerializer(serializers.ModelSerializer):
+    released_by_username = serializers.CharField(
+        source='released_by.username', read_only=True, default=None,
+    )
+
     class Meta:
         model = Offer
         fields = [
             'id', 'hiring_application', 'offered_ctc', 'salary_breakup',
-            'joining_date', 'status', 'released_by', 'released_at',
+            'joining_date', 'status',
+            'released_by', 'released_by_username', 'released_at',
             'accepted_at', 'declined_at', 'notes',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+
+class OfferCreateSerializer(serializers.Serializer):
+    """Input for creating a new offer."""
+    hiring_application = serializers.PrimaryKeyRelatedField(
+        queryset=HiringApplication.objects.all(),
+    )
+    offered_ctc = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01')
+    )
+    salary_breakup = serializers.JSONField(required=False, default=dict)
+    joining_date = serializers.DateField(required=False, allow_null=True, default=None)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class OfferUpdateSerializer(serializers.Serializer):
+    """Input for patching a draft offer."""
+    offered_ctc = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'), required=False,
+    )
+    salary_breakup = serializers.JSONField(required=False)
+    joining_date = serializers.DateField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class OfferActionSerializer(serializers.Serializer):
+    """Input for offer lifecycle actions (release/accept/decline/withdraw/expire)."""
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+# ─── Candidate Pool (ranked results) ─────────────────────────────────────────
+
+class CandidatePoolResultSerializer(serializers.Serializer):
+    """Single ranked candidate entry returned by the candidate-pool endpoint."""
+    candidate = serializers.SerializerMethodField()
+    score = serializers.FloatField()
+    match_status = serializers.CharField()
+    score_breakdown = serializers.DictField()
+    matched_skills = serializers.ListField(child=serializers.CharField())
+    missing_skills = serializers.ListField(child=serializers.CharField())
+    reasons = serializers.ListField(child=serializers.CharField())
+    warnings = serializers.ListField(child=serializers.CharField())
+
+    def get_candidate(self, obj):
+        from apps.talent.serializers import CandidateSerializer
+        return CandidateSerializer(obj['candidate'], context=self.context).data
+
+
+# ─── Shortlist (input) ────────────────────────────────────────────────────────
+
+class ShortlistCandidateSerializer(serializers.Serializer):
+    candidate = serializers.PrimaryKeyRelatedField(queryset=Candidate.objects.all())
+    match_result = serializers.PrimaryKeyRelatedField(
+        queryset=CandidateMatchResult.objects.all(),
+        required=False, allow_null=True, default=None,
+    )
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+# ─── Client Review ────────────────────────────────────────────────────────────
+
+class SendToClientReviewSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class BulkSendToClientReviewSerializer(serializers.Serializer):
+    application_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, allow_null=True, default=None,
+    )
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class ClientDecisionSerializer(serializers.Serializer):
+    DECISION_CHOICES = ['approved', 'rejected']
+    decision = serializers.ChoiceField(choices=DECISION_CHOICES)
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+    override = serializers.BooleanField(required=False, default=False)
+
+
+class ClientReviewApplicationSerializer(serializers.ModelSerializer):
+    """
+    Client-facing read serializer. Exposes safe candidate summary only —
+    never raw_text or cleaned_text from the resume file.
+    """
+    candidate_summary = serializers.SerializerMethodField()
+    job_role_name = serializers.CharField(source='job_role.name', read_only=True)
+    site_name = serializers.CharField(source='site.name', read_only=True)
+    client_name = serializers.CharField(
+        source='site.client.name', read_only=True, default=None,
+    )
+    current_stage_name = serializers.CharField(
+        source='current_stage.name', read_only=True, default=None,
+    )
+    client_decision_by_username = serializers.CharField(
+        source='client_decision_by.username', read_only=True, default=None,
+    )
+    resume_summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HiringApplication
+        fields = [
+            'id', 'org',
+            'candidate', 'candidate_summary',
+            'mrf', 'mrf_line_item',
+            'site', 'site_name', 'client_name',
+            'job_role', 'job_role_name',
+            'match_score',
+            'status',
+            'current_stage', 'current_stage_name',
+            'client_visible',
+            'client_decision',
+            'client_decision_by', 'client_decision_by_username',
+            'client_decision_at',
+            'client_decision_note',
+            'resume_summary',
+            'created_at', 'updated_at',
+        ]
+
+    def get_candidate_summary(self, obj):
+        c = obj.candidate
+        return {
+            'id': c.pk,
+            'full_name': c.full_name,
+            'phone': c.phone,
+            'email': c.email or '',
+            'current_role': c.current_role or '',
+            'current_location': c.current_location or '',
+            'total_experience_years': (
+                str(c.total_experience_years) if c.total_experience_years is not None else None
+            ),
+            'availability_status': c.availability_status or '',
+        }
+
+    def get_resume_summary(self, obj):
+        """Parsed resume metadata — deliberately excludes raw_text and cleaned_text."""
+        try:
+            from apps.talent.models import ParsedResume
+            parsed = (
+                ParsedResume.objects
+                .filter(resume__candidate=obj.candidate, resume__status='indexed')
+                .order_by('-created_at')
+                .first()
+            )
+            if not parsed:
+                return None
+            return {
+                'confidence': str(parsed.confidence) if parsed.confidence is not None else None,
+                'summary': parsed.summary or '',
+                'career_level': parsed.career_level or '',
+                'primary_domain': parsed.primary_domain or '',
+            }
+        except Exception:
+            return None

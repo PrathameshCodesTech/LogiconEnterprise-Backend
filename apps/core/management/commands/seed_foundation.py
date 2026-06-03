@@ -668,3 +668,9 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'  [User] {user.email} ({role_code}) — {"CREATED" if created else "EXISTS"}'
             )
+
+
+
+
+
+

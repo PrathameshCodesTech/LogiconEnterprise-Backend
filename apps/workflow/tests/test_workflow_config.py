@@ -57,7 +57,7 @@ from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.core.models import Department, Organization, ScopeNode
-from apps.onboarding.models import ClientOnboardingRequest
+from apps.mobilisation.models import MobilisationSetupRequest
 from apps.sites.models import Client, SiteProfile
 from apps.workflow.models import (
     StepAssignmentConfig,
@@ -390,9 +390,9 @@ class TestApprovalStepAPI(ConfigTestBase):
     def test_delete_blocked_if_step_instance_exists(self):
         """Scenario 14: step with step instances cannot be deleted."""
         # Create a minimal onboarding request + workflow instance + step instance
-        req = ClientOnboardingRequest.objects.create(
+        req = MobilisationSetupRequest.objects.create(
             org=self.org, client=self.wf_client, requested_by=self.u_manage,
-            onboarding_type='new_client', status='draft',
+            mobilisation_type='new_client', status='draft',
         )
         wi = WorkflowInstance.objects.create(
             org=self.org, client_onboarding_request=req,

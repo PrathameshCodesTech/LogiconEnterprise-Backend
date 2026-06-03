@@ -303,7 +303,7 @@ class ConfigPreviewView(APIView):
     Never creates workflows. Always returns 200 — check `ok` field.
 
     Query params:
-      request_type  (required) — trigger_type alias: 'mrf' | 'client_onboarding'
+      request_type  (required) — trigger_type alias: 'mrf' | 'client_onboarding' | 'sales_proposal'
       client        (optional) — Client PK
       site          (optional) — SiteProfile PK
     """

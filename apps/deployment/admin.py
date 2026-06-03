@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Employee, SiteDeployment
+from .models import DeploymentHistory, Employee, SiteDeployment
 
 
 class SiteDeploymentInline(admin.TabularInline):
@@ -40,4 +40,28 @@ class SiteDeploymentAdmin(admin.ModelAdmin):
     raw_id_fields = [
         'org', 'employee', 'site', 'job_role',
         'mrf_line_item', 'hiring_application', 'created_by',
+    ]
+
+
+@admin.register(DeploymentHistory)
+class DeploymentHistoryAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'created_at', 'action_type', 'employee', 'deployment',
+        'from_status', 'to_status', 'actor',
+    ]
+    search_fields = [
+        'employee__employee_code',
+        'employee__first_name', 'employee__last_name',
+        'note',
+    ]
+    list_filter = ['action_type', 'org', 'from_status', 'to_status']
+    readonly_fields = [
+        'org', 'employee', 'deployment', 'action_type',
+        'from_status', 'to_status',
+        'from_site', 'to_site', 'from_job_role', 'to_job_role',
+        'actor', 'note', 'metadata', 'created_at', 'updated_at',
+    ]
+    raw_id_fields = [
+        'org', 'employee', 'deployment',
+        'from_site', 'to_site', 'from_job_role', 'to_job_role', 'actor',
     ]

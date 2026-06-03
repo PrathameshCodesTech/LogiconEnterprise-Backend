@@ -1,7 +1,7 @@
 """
 apps/workflow/management/commands/seed_client_onboarding_workflow_demo.py
 
-Creates a demo client_onboarding workflow template for local/dev testing.
+Creates a demo mobilisation workflow template (trigger_type client_onboarding) for local/dev testing.
 Fully idempotent — safe to run multiple times.
 
 Usage:
@@ -27,12 +27,12 @@ STEP_DEPT_CODES = {
     'final_admin_review': None,
 }
 
-DEMO_SUMMARY = 'Demo onboarding request for newly closed client setup'
+DEMO_SUMMARY = 'Demo mobilisation setup request for newly closed client'
 
 
 class Command(BaseCommand):
     help = (
-        'Seed a demo client_onboarding workflow template with 5 steps '
+        'Seed a demo Mobilisation Approval workflow template (trigger client_onboarding) with 5 steps '
         '(sales_submit_review, operations_review, hr_review, finance_review, final_admin_review). '
         'Fully idempotent — safe to run multiple times.'
     )
@@ -53,7 +53,7 @@ class Command(BaseCommand):
         )
         from apps.accounts.models import User
 
-        self.stdout.write('=== Client Onboarding Workflow Demo Seed ===')
+        self.stdout.write('=== Mobilisation Workflow Demo Seed ===')
 
         org_code = options['org']
         try:
@@ -69,10 +69,10 @@ class Command(BaseCommand):
             org=org,
             code='client_onboarding_default',
             defaults={
-                'name': 'Client Onboarding Default Workflow',
+                'name': 'Mobilisation Standard Route',
                 'trigger_type': 'client_onboarding',
                 'version': 1,
-                'description': 'Standard onboarding: Sales -> Ops -> HR -> Finance -> Admin.',
+                'description': 'Mobilisation Approval: Sales -> Ops -> HR -> Finance -> Admin.',
                 'is_active': True,
             },
         )
@@ -207,11 +207,11 @@ class Command(BaseCommand):
                     f'(dept: {dept_label}) -> {label}'
                 )
 
-        # ── Demo onboarding request ────────────────────────────────────────────
-        self.stdout.write('\n--- Demo Onboarding Request ---')
+        # ── Demo mobilisation setup request ─────────────────────────────────────
+        self.stdout.write('\n--- Demo Mobilisation Setup Request ---')
         self._seed_demo_request(org, options, User)
 
-        self.stdout.write(self.style.SUCCESS('\n[OK] Client onboarding workflow demo seed complete.'))
+        self.stdout.write(self.style.SUCCESS('\n[OK] Mobilisation workflow demo seed complete.'))
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
@@ -257,8 +257,8 @@ class Command(BaseCommand):
         return dept
 
     def _seed_demo_request(self, org, options, User):
-        """Create or confirm the demo ClientOnboardingRequest."""
-        from apps.onboarding.models import ClientOnboardingRequest
+        """Create or confirm the demo MobilisationSetupRequest."""
+        from apps.mobilisation.models import MobilisationSetupRequest
         from apps.sites.models import Client
 
         # Prefer ABC Infrastructure; fall back to first available client
@@ -290,21 +290,20 @@ class Command(BaseCommand):
                 )
             )
 
-        req, created = ClientOnboardingRequest.objects.get_or_create(
+        req, created = MobilisationSetupRequest.objects.get_or_create(
             org=org,
             client=client,
-            onboarding_type='new_client',
+            mobilisation_type='new_client',
             summary=DEMO_SUMMARY,
             defaults={
                 'requested_by': requested_by,
-                'expected_site_count': 3,
                 'status': 'draft',
             },
         )
         label = 'CREATED' if created else 'EXISTS'
         self.stdout.write(
             f'  [DemoRequest] id={req.pk} | client={client.name} | '
-            f'type={req.onboarding_type} | status={req.status} -> {label}'
+            f'type={req.mobilisation_type} | status={req.status} -> {label}'
         )
         self.stdout.write(f'    summary="{req.summary}"')
         self.stdout.write(f'    requested_by={req.requested_by.username}')

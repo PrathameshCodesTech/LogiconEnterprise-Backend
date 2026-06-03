@@ -598,6 +598,22 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
         data = super().validate(data)
         instance = self.instance
 
+        request = self.context.get('request')
+        is_client_actor = False
+        if request is not None:
+            from apps.access.capabilities import is_client_facing_user
+            is_client_actor = is_client_facing_user(request.user)
+
+        requested_by_type = data.get(
+            'requested_by_type',
+            instance.requested_by_type if instance else None,
+        )
+        client_requested = is_client_actor or requested_by_type == 'client'
+        if client_requested:
+            data['requested_by_type'] = 'client'
+            data['billing_type'] = 'billable'
+            data['client_visible'] = True
+
         site = data.get('site') or (instance.site if instance else None)
         requesting_department = data.get(
             'requesting_department',
@@ -626,6 +642,12 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
         if exp_min is not None and exp_max is not None and exp_min > exp_max:
             errors['experience_min_years'] = (
                 'experience_min_years cannot exceed experience_max_years.'
+            )
+
+        mrf_type = data.get('mrf_type', instance.mrf_type if instance else None)
+        if client_requested and mrf_type == 'rate_revision':
+            errors['mrf_type'] = (
+                "Client-requested MRFs cannot use 'rate_revision'."
             )
 
         # ── request_number uniqueness (belt-and-suspenders over DB constraint) ─

@@ -352,7 +352,15 @@ def _link_resume_if_needed(doc: IntakeDocument, candidate) -> None:
     if doc.document_type != 'resume':
         return
     from apps.talent.models import Resume
-    Resume.objects.get_or_create(
+    from apps.talent.services import compute_file_hash, queue_resume_processing
+
+    file_hash = ''
+    try:
+        file_hash = compute_file_hash(doc.file)
+    except Exception:
+        pass
+
+    resume, created = Resume.objects.get_or_create(
         source_intake_document=doc,
         defaults={
             'candidate': candidate,
@@ -362,8 +370,12 @@ def _link_resume_if_needed(doc: IntakeDocument, candidate) -> None:
             'size_bytes': doc.size_bytes,
             'source_type': 'qr_intake',
             'status': 'uploaded',
+            'file_hash': file_hash,
         },
     )
+
+    if created:
+        queue_resume_processing(resume)
 
 
 def create_intake_documents(submission: IntakeSubmission, files) -> list:

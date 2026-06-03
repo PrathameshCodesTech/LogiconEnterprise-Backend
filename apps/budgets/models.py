@@ -11,6 +11,12 @@ from django.db.models import Q
 from apps.core.models import Organization, Department, TimeStampedModel
 
 
+SOURCE_TYPE_CHOICES = [
+    ('sales_conversion', 'Sales Conversion'),
+    ('manual_admin', 'Manual Admin'),
+    ('import', 'Import'),
+]
+
 BUDGET_NATURE_CHOICES = [
     ('billable', 'Billable'),
     ('non_billable', 'Non-Billable'),
@@ -84,6 +90,18 @@ class BudgetPlan(TimeStampedModel):
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
+    )
+
+    source_type = models.CharField(
+        max_length=20, choices=SOURCE_TYPE_CHOICES, default='manual_admin',
+    )
+    source_sales_lead = models.ForeignKey(
+        'sales.SalesLead', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_budget_plans',
+    )
+    source_proposal_version = models.ForeignKey(
+        'sales.ProposalVersion', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='converted_budget_plans',
     )
 
     class Meta:

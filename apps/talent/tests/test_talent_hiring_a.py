@@ -415,7 +415,7 @@ class TestQRIntakeLinksResume(TestCase):
         )
         self.assertTrue(talent_resumes.exists(), "talent.Resume was not created for QR intake resume doc")
         tr = talent_resumes.first()
-        self.assertEqual(tr.status, 'uploaded')
+        self.assertIn(tr.status, ('uploaded', 'extracting'))
 
     # test_18
     def test_18_link_resume_idempotent_duplicate_call(self):

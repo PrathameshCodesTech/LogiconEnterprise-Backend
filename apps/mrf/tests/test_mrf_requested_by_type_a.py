@@ -23,6 +23,8 @@ Scenarios:
   13. Internal user POST with requested_by_type='client' → saved as 'client'.
   14. Internal user PATCH can change requested_by_type.
   15. Superuser POST with requested_by_type='internal' → saved as 'internal'.
+  16. Client-requested MRFs are forced billable and client-visible.
+  17. Client-requested MRFs cannot use rate_revision.
 """
 
 from datetime import date
@@ -270,3 +272,50 @@ class TestRequestedByTypeEnforcement(TestCase):
         self.assertEqual(resp.status_code, 201, resp.data)
         mrf = ManpowerRequest.objects.get(pk=resp.data['id'])
         self.assertEqual(mrf.requested_by_type, 'internal')
+
+    def test_client_requested_mrf_is_forced_billable_and_visible(self):
+        resp = self._api(self.internal_user).post(
+            MRF_URL,
+            {
+                **_mrf_payload(self.site),
+                'requested_by_type': 'client',
+                'billing_type': 'non_billable',
+                'client_visible': False,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        mrf = ManpowerRequest.objects.get(pk=resp.data['id'])
+        self.assertEqual(mrf.requested_by_type, 'client')
+        self.assertEqual(mrf.billing_type, 'billable')
+        self.assertTrue(mrf.client_visible)
+
+    def test_client_facing_user_mrf_is_forced_billable_and_visible(self):
+        resp = self._api(self.client_user).post(
+            MRF_URL,
+            {
+                **_mrf_payload(self.site),
+                'requested_by_type': 'internal',
+                'billing_type': 'non_billable',
+                'client_visible': False,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        mrf = ManpowerRequest.objects.get(pk=resp.data['id'])
+        self.assertEqual(mrf.requested_by_type, 'client')
+        self.assertEqual(mrf.billing_type, 'billable')
+        self.assertTrue(mrf.client_visible)
+
+    def test_client_requested_rate_revision_is_rejected(self):
+        resp = self._api(self.internal_user).post(
+            MRF_URL,
+            {
+                **_mrf_payload(self.site),
+                'requested_by_type': 'client',
+                'mrf_type': 'rate_revision',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('mrf_type', resp.data)

@@ -222,7 +222,7 @@ class TestResumeAPI(HiringBBase):
             'source_type': 'manual_upload',
         }, format='multipart')
         self.assertEqual(resp.status_code, 201, resp.data)
-        self.assertEqual(resp.data['status'], 'uploaded')
+        self.assertEqual(resp.data['status'], 'extracting')
         self.assertEqual(resp.data['original_filename'], 'cv.pdf')
         self.assertEqual(resp.data['content_type'], 'application/pdf')
         self.assertGreater(resp.data['size_bytes'], 0)

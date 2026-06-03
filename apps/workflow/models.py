@@ -20,7 +20,8 @@ from apps.core.models import Organization, TimeStampedModel
 
 TRIGGER_TYPE_CHOICES = [
     ('mrf', 'MRF'),
-    ('client_onboarding', 'Client Onboarding'),
+    ('client_onboarding', 'Mobilisation'),
+    ('sales_proposal', 'Sales Proposal'),
 ]
 
 ASSIGNMENT_MODE_CHOICES = [
@@ -673,7 +674,7 @@ class ApprovalRouteStepAssignment(TimeStampedModel):
 class WorkflowInstance(TimeStampedModel):
     """
     A running workflow attached to exactly one target object.
-    Either mrf or client_onboarding_request must be set (never both, never neither).
+    Exactly one target must be set: MRF, mobilisation setup, or sales proposal.
     Enforced at the service layer.
     """
 
@@ -692,7 +693,11 @@ class WorkflowInstance(TimeStampedModel):
         null=True, blank=True, related_name='workflow_instances',
     )
     client_onboarding_request = models.ForeignKey(
-        'onboarding.ClientOnboardingRequest', on_delete=models.PROTECT,
+        'mobilisation.MobilisationSetupRequest', on_delete=models.PROTECT,
+        null=True, blank=True, related_name='workflow_instances',
+    )
+    proposal_version = models.ForeignKey(
+        'sales.ProposalVersion', on_delete=models.PROTECT,
         null=True, blank=True, related_name='workflow_instances',
     )
     template = models.ForeignKey(
@@ -720,8 +725,21 @@ class WorkflowInstance(TimeStampedModel):
         constraints = [
             models.CheckConstraint(
                 check=(
-                    models.Q(mrf__isnull=False, client_onboarding_request__isnull=True) |
-                    models.Q(mrf__isnull=True, client_onboarding_request__isnull=False)
+                    models.Q(
+                        mrf__isnull=False,
+                        client_onboarding_request__isnull=True,
+                        proposal_version__isnull=True,
+                    ) |
+                    models.Q(
+                        mrf__isnull=True,
+                        client_onboarding_request__isnull=False,
+                        proposal_version__isnull=True,
+                    ) |
+                    models.Q(
+                        mrf__isnull=True,
+                        client_onboarding_request__isnull=True,
+                        proposal_version__isnull=False,
+                    )
                 ),
                 name='workflow_instance_exactly_one_target',
             ),
@@ -735,24 +753,35 @@ class WorkflowInstance(TimeStampedModel):
                 condition=models.Q(status='active', client_onboarding_request__isnull=False),
                 name='unique_active_workflow_per_onboarding',
             ),
+            models.UniqueConstraint(
+                fields=['proposal_version'],
+                condition=models.Q(status='active', proposal_version__isnull=False),
+                name='unique_active_workflow_per_proposal_version',
+            ),
         ]
 
     def __str__(self):
         if self.mrf_id:
             target = f"MRF #{self.mrf_id}"
         elif self.client_onboarding_request_id:
-            target = f"Onboarding #{self.client_onboarding_request_id}"
+            target = f"Mobilisation #{self.client_onboarding_request_id}"
+        elif self.proposal_version_id:
+            target = f"ProposalVersion #{self.proposal_version_id}"
         else:
             target = "Unknown"
         return f"Workflow #{self.pk} for {target} — {self.status}"
 
     def clean(self):
         from django.core.exceptions import ValidationError
-        has_mrf = self.mrf_id is not None
-        has_onboarding = self.client_onboarding_request_id is not None
-        if has_mrf == has_onboarding:
+        targets = sum([
+            self.mrf_id is not None,
+            self.client_onboarding_request_id is not None,
+            self.proposal_version_id is not None,
+        ])
+        if targets != 1:
             raise ValidationError(
-                'WorkflowInstance must be attached to exactly one target: mrf or client_onboarding_request.'
+                'WorkflowInstance must be attached to exactly one target: '
+                'mrf, mobilisation setup, or proposal_version.'
             )
 
 

@@ -116,6 +116,23 @@ def filter_site_role_requirements_for_user(queryset, user):
     return queryset.filter(site_q | client_q).distinct()
 
 
+def filter_mobilisation_requests_for_user(queryset, user):
+    """
+    Filter MobilisationSetupRequest queryset via client.scope_node path.
+    Requests with no client are org-scoped: visible to any user in the same org
+    who has at least one scope assignment.
+    """
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    org_id = getattr(user, 'org_id', None)
+    client_q = _scope_q('client__scope_node__path', paths)
+    no_client_q = Q(client__isnull=True, org_id=org_id) if org_id else Q(pk__in=[])
+    return queryset.filter(client_q | no_client_q).distinct()
+
+
 def filter_onboarding_requests_for_user(queryset, user):
     """
     Filter ClientOnboardingRequest queryset via client.scope_node path.
@@ -400,3 +417,27 @@ def filter_employees_for_user(queryset, user):
         .distinct()
     )
     return queryset.filter(pk__in=accessible_ids)
+
+
+def filter_deployment_history_for_user(queryset, user):
+    """
+    Filter DeploymentHistory queryset.
+
+    A history row is accessible if its employee has any deployment to a site
+    inside the user's accessible scope. Mirrors `filter_employees_for_user`.
+    """
+    if user.is_superuser:
+        return queryset
+    paths = get_accessible_scope_paths(user)
+    if not paths:
+        return queryset.none()
+    from apps.deployment.models import SiteDeployment
+    site_q = _scope_q('site__scope_node__path', paths)
+    client_q = _scope_q('site__client__scope_node__path', paths)
+    accessible_employee_ids = (
+        SiteDeployment.objects
+        .filter(site_q | client_q)
+        .values_list('employee_id', flat=True)
+        .distinct()
+    )
+    return queryset.filter(employee_id__in=accessible_employee_ids).distinct()
