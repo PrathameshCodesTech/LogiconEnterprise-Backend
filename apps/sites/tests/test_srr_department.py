@@ -32,6 +32,7 @@ from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
 from apps.core.models import Organization, ScopeNode, Department
 from apps.jobs.models import JobRole
+from apps.mrf.models import ManpowerRequest, MRFLineItem
 from apps.sites.models import Client, SiteProfile, SiteRoleRequirement
 from apps.wages.models import WageCategory
 
@@ -267,6 +268,49 @@ class TestSRRDepartmentRead(SRRDeptBase):
         self.assertEqual(resp.data['department'], self.dept_client.pk)
         self.assertEqual(resp.data['department_name'], self.dept_client.name)
         self.assertEqual(resp.data['department_code'], self.dept_client.code)
+
+    def test_d08a_read_exposes_allocated_and_remaining_headcount(self):
+        """SRR read response subtracts active MRF demand and ignores drafts."""
+        srr = _srr(self.site, self.job_role, approved_headcount=6)
+        approved_mrf = ManpowerRequest.objects.create(
+            org=self.org,
+            site=self.site,
+            requested_by=self.admin,
+            requested_by_type='client',
+            mrf_type='new_hiring',
+            status='approved',
+            billing_type='billable',
+            client_visible=True,
+        )
+        draft_mrf = ManpowerRequest.objects.create(
+            org=self.org,
+            site=self.site,
+            requested_by=self.admin,
+            requested_by_type='client',
+            mrf_type='new_hiring',
+            status='draft',
+            billing_type='billable',
+            client_visible=True,
+        )
+        MRFLineItem.objects.create(
+            mrf=approved_mrf,
+            site_role_requirement=srr,
+            job_role=self.job_role,
+            headcount=3,
+        )
+        MRFLineItem.objects.create(
+            mrf=draft_mrf,
+            site_role_requirement=srr,
+            job_role=self.job_role,
+            headcount=2,
+        )
+
+        resp = self._api(self.admin).get(self._srr_detail_url(srr.pk))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['approved_headcount'], 6)
+        self.assertEqual(resp.data['allocated_headcount'], 3)
+        self.assertEqual(resp.data['remaining_headcount'], 3)
 
     def test_d09_read_exposes_site_and_role_names(self):
         """site_name, job_role_name, job_role_code appear in GET response."""

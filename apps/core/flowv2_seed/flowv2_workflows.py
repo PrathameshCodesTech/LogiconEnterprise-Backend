@@ -7,15 +7,119 @@ def _write(writer, message):
 
 
 def seed_logicon_demo_workflows(context, *, writer=None):
-    """Seed sales proposal and mobilisation approval workflow routes."""
+    """Seed MRF, sales proposal, and mobilisation approval workflow routes."""
     org = context['org']
     users = context['users']
+    mrf_result = _seed_mrf_workflow(org, users, writer)
     sales_result = _seed_sales_proposal_workflow(org, users, writer)
     mobilisation_result = _seed_mobilisation_workflow(org, users, writer)
     return {
+        'mrf': mrf_result,
         'sales_proposal': sales_result,
         'mobilisation': mobilisation_result,
     }
+
+
+def _seed_mrf_workflow(org, users, writer):
+    from apps.workflow.models import (
+        ApprovalRoute,
+        ApprovalRouteStepAssignment,
+        StepAssignmentConfig,
+        WorkflowStepTemplate,
+        WorkflowTemplate,
+        WorkflowTemplateMapping,
+    )
+
+    template, _ = WorkflowTemplate.objects.get_or_create(
+        org=org,
+        code='logicon_mrf_default',
+        defaults={
+            'name': 'Logicon MRF Approval Route',
+            'trigger_type': 'mrf',
+            'version': 1,
+            'description': 'Logicon MRF approval route: HR, Finance, Admin.',
+            'is_active': True,
+        },
+    )
+    steps = [
+        (1, 'hr_review', 'HR Review', users['hr']),
+        (2, 'finance_review', 'Finance Review', users['finance']),
+        (3, 'admin_review', 'Admin Review', users['admin']),
+    ]
+    for order, code, name, _user in steps:
+        WorkflowStepTemplate.objects.get_or_create(
+            template=template,
+            code=code,
+            defaults={
+                'order': order,
+                'name': name,
+                'assignment_mode': 'named_user',
+                'actor_type': 'internal',
+                'on_approve_next': 'END' if code == 'admin_review' else '',
+                'requires_comment_on_reject': True,
+                'requires_comment_on_request_changes': True,
+            },
+        )
+
+    mapping, _ = WorkflowTemplateMapping.objects.get_or_create(
+        org=org,
+        trigger_type='mrf',
+        client=None,
+        site=None,
+        is_active=True,
+        defaults={'template': template},
+    )
+    if mapping.template_id != template.pk:
+        mapping.template = template
+        mapping.save(update_fields=['template', 'updated_at'])
+
+    route, _ = ApprovalRoute.objects.get_or_create(
+        org=org,
+        code='logicon_mrf_standard',
+        defaults={
+            'name': 'Logicon MRF Standard Route',
+            'trigger_type': 'mrf',
+            'template': template,
+            'is_default': True,
+            'is_active': True,
+        },
+    )
+    changed = []
+    if route.template_id != template.pk:
+        route.template = template
+        changed.append('template')
+    if not route.is_default:
+        route.is_default = True
+        changed.append('is_default')
+    if changed:
+        route.save(update_fields=changed + ['updated_at'])
+
+    for _order, code, _name, user in steps:
+        StepAssignmentConfig.objects.update_or_create(
+            org=org,
+            trigger_type='mrf',
+            step_code=code,
+            client=None,
+            site=None,
+            is_active=True,
+            defaults={
+                'assignment_mode': 'named_user',
+                'named_user': user,
+                'department': user.department,
+            },
+        )
+        ApprovalRouteStepAssignment.objects.update_or_create(
+            route=route,
+            step_code=code,
+            defaults={
+                'assignment_mode': 'named_user',
+                'named_user': user,
+                'department': user.department,
+                'is_active': True,
+            },
+        )
+    _write(writer, '[LogiconSeed] MRF workflow ready')
+    return {'template': template, 'mapping': mapping, 'route': route}
 
 
 def _seed_sales_proposal_workflow(org, users, writer):

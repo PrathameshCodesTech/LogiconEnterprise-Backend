@@ -41,8 +41,18 @@ from rest_framework.test import APIClient
 from apps.access.models import AccessRole, AccessRolePermission, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions, get_or_create_permission
 from apps.accounts.models import User
-from apps.budgets.models import BudgetPlan
+from apps.budgets.models import BudgetPlan, BudgetReservation
 from apps.core.models import Department, Organization, ScopeNode
+from apps.jobs.models import JobRole
+from apps.mrf.models import ManpowerRequest
+from apps.sales.models import (
+    ProposalBreakupLine,
+    ProposalBudgetLine,
+    ProposalVersion,
+    SalesLead,
+    SalesLeadSite,
+    SalesRoleRequirement,
+)
 from apps.sites.models import Client, SiteProfile
 
 
@@ -462,6 +472,167 @@ class TestBudgetScopingAndFilter(BudgetTestBase):
 
 
 # ─── Seed / capability tests ──────────────────────────────────────────────────
+
+class TestBudgetClientCommercials(BudgetTestBase):
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.client_role = _role(cls.org, 'client_admin')
+        bootstrap_role_permissions(cls.client_role)
+        cls.client_user = _user('bgt_client_admin', org=cls.org)
+        _assign(cls.client_user, cls.client_role, cls.n_cl)
+
+        cls.job_role = JobRole.objects.create(
+            org=cls.org,
+            name='Electrician',
+            code='electrician',
+            skill_category='skilled',
+        )
+        cls.lead = SalesLead.objects.create(
+            org=cls.org,
+            client_name=cls.budget_client.name,
+            client_email='buyer@example.com',
+        )
+        cls.lead_site = SalesLeadSite.objects.create(
+            lead=cls.lead,
+            site_name=cls.site.name,
+            is_active=True,
+        )
+        cls.role_requirement = SalesRoleRequirement.objects.create(
+            lead=cls.lead,
+            site=cls.lead_site,
+            job_role=cls.job_role,
+            manpower_count=2,
+            approved_by_operations=True,
+        )
+        cls.proposal = ProposalVersion.objects.create(
+            lead=cls.lead,
+            version_number=1,
+            status='client_approved',
+            internal_approval_status='approved',
+            client_approval_status='approved',
+            is_final_approved_version=True,
+            grand_total='100000.00',
+            subtotal_amount='90000.00',
+            management_fee_amount='5000.00',
+            gst_amount='5000.00',
+            manpower_total=2,
+            management_fee_percent='5.00',
+            gst_applicable=True,
+            validity_days=30,
+            sales_remarks='internal sales note',
+        )
+        ProposalBudgetLine.objects.create(
+            proposal_version=cls.proposal,
+            site=cls.lead_site,
+            role_requirement=cls.role_requirement,
+            job_role=cls.job_role,
+            service_category='Technical',
+            description='Electrician',
+            manpower_count=2,
+            unit_cost='45000.00',
+            total_cost='90000.00',
+            remarks='internal budget note',
+            sort_order=1,
+        )
+        ProposalBreakupLine.objects.create(
+            proposal_version=cls.proposal,
+            site=cls.lead_site,
+            role_requirement=cls.role_requirement,
+            job_role=cls.job_role,
+            component_name='Basic',
+            component_type='earning',
+            amount='19000.00',
+            remarks='internal breakup note',
+            sort_order=101,
+        )
+        cls.budget = BudgetPlan.objects.create(
+            org=cls.org,
+            name='Approved Client Budget',
+            code='approved-client-commercial',
+            budget_nature='billable',
+            budget_type='manpower',
+            client=cls.budget_client,
+            site=cls.site,
+            period_start=datetime.date(2026, 1, 1),
+            amount='100000.00',
+            currency='INR',
+            status='active',
+            is_active=True,
+            source_type='sales_conversion',
+            source_sales_lead=cls.lead,
+            source_proposal_version=cls.proposal,
+        )
+        cls.reserved_mrf = ManpowerRequest.objects.create(
+            org=cls.org,
+            site=cls.site,
+            requested_by=cls.client_user,
+            requested_by_type='client',
+            mrf_type='new_hiring',
+            status='submitted',
+            billing_type='billable',
+            budget_plan=cls.budget,
+        )
+        cls.committed_mrf = ManpowerRequest.objects.create(
+            org=cls.org,
+            site=cls.site,
+            requested_by=cls.client_user,
+            requested_by_type='client',
+            mrf_type='new_hiring',
+            status='approved',
+            billing_type='billable',
+            budget_plan=cls.budget,
+        )
+        BudgetReservation.objects.create(
+            org=cls.org,
+            budget_plan=cls.budget,
+            mrf=cls.reserved_mrf,
+            amount='12000.00',
+            status='reserved',
+        )
+        BudgetReservation.objects.create(
+            org=cls.org,
+            budget_plan=cls.budget,
+            mrf=cls.committed_mrf,
+            amount='8000.00',
+            status='committed',
+        )
+
+    def test_client_user_can_read_approved_budget_commercials(self):
+        self._login(self.client_user)
+
+        resp = self.api.get(f'{URL}{self.budget.pk}/client-commercials/')
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['budget']['id'], self.budget.pk)
+        self.assertEqual(resp.data['budget']['reserved_amount'], '12000.00')
+        self.assertEqual(resp.data['budget']['committed_amount'], '8000.00')
+        self.assertEqual(resp.data['budget']['available_amount'], '80000.00')
+        self.assertEqual(resp.data['proposal']['id'], self.proposal.pk)
+        self.assertEqual(resp.data['proposal']['grand_total'], '100000.00')
+        self.assertEqual(len(resp.data['budget_lines']), 1)
+        self.assertEqual(resp.data['budget_lines'][0]['job_role_name'], 'Electrician')
+        self.assertEqual(resp.data['budget_lines'][0]['unit_cost'], '45000.00')
+        self.assertNotIn('remarks', resp.data['budget_lines'][0])
+        self.assertEqual(len(resp.data['breakup_lines']), 1)
+        self.assertEqual(resp.data['breakup_lines'][0]['component_name'], 'Basic')
+        self.assertNotIn('remarks', resp.data['breakup_lines'][0])
+        self.assertNotIn('internal_approval_status', resp.data['proposal'])
+        self.assertNotIn('sales_remarks', resp.data['proposal'])
+
+    def test_non_final_proposal_lines_are_hidden_from_client_commercials(self):
+        self.proposal.is_final_approved_version = False
+        self.proposal.save(update_fields=['is_final_approved_version'])
+        self._login(self.client_user)
+
+        resp = self.api.get(f'{URL}{self.budget.pk}/client-commercials/')
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(resp.data['proposal'])
+        self.assertEqual(resp.data['budget_lines'], [])
+        self.assertEqual(resp.data['breakup_lines'], [])
+
 
 class TestBudgetSeedCapabilities(TestCase):
 

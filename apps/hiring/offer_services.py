@@ -10,21 +10,26 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .models import ApplicationStageHistory, Offer
+from .models import Offer
+from .lifecycle import (
+    STAGE_CLIENT_APPROVED,
+    STAGE_OFFER,
+    STAGE_OFFER_ACCEPTED,
+    STAGE_REJECTED_CLOSED,
+    transition_application,
+)
 
 
 _OFFER_CREATE_ALLOWED_STATUSES = {'selected'}
 _OFFER_IMMUTABLE_STATUSES = {'accepted', 'declined', 'withdrawn', 'expired'}
 
 
-def _record_app_history(application, actor, old_status, new_status, comment):
-    ApplicationStageHistory.objects.create(
-        hiring_application=application,
-        from_stage=application.current_stage,
-        to_stage=application.current_stage,
-        from_status=old_status,
-        to_status=new_status,
-        moved_by=actor,
+def _record_app_history(application, actor, old_status, new_status, comment, stage_code=None):
+    transition_application(
+        application,
+        actor=actor,
+        status=new_status,
+        stage_code=stage_code,
         comment=comment,
     )
 
@@ -128,12 +133,10 @@ def release_offer(offer, actor, note='') -> Offer:
         offer.released_at = timezone.now()
         offer.save(update_fields=['status', 'released_by', 'released_at'])
 
-        application.status = 'offer_released'
-        application.save(update_fields=['status'])
-
         _record_app_history(
             application, actor, old_status, 'offer_released',
             note or 'Offer released to candidate.',
+            stage_code=STAGE_OFFER,
         )
 
     return offer
@@ -154,12 +157,10 @@ def accept_offer(offer, actor=None, note='') -> Offer:
         offer.accepted_at = timezone.now()
         offer.save(update_fields=['status', 'accepted_at'])
 
-        application.status = 'offer_accepted'
-        application.save(update_fields=['status'])
-
         _record_app_history(
             application, actor, old_status, 'offer_accepted',
             note or 'Candidate accepted the offer.',
+            stage_code=STAGE_OFFER_ACCEPTED,
         )
 
     return offer
@@ -180,12 +181,10 @@ def decline_offer(offer, actor=None, note='') -> Offer:
         offer.declined_at = timezone.now()
         offer.save(update_fields=['status', 'declined_at'])
 
-        application.status = 'offer_declined'
-        application.save(update_fields=['status'])
-
         _record_app_history(
             application, actor, old_status, 'offer_declined',
             note or 'Candidate declined the offer.',
+            stage_code=STAGE_REJECTED_CLOSED,
         )
 
     return offer
@@ -208,11 +207,10 @@ def withdraw_offer(offer, actor, note='') -> Offer:
         offer.save(update_fields=['status'])
 
         if old_status == 'offer_released':
-            application.status = 'selected'
-            application.save(update_fields=['status'])
             _record_app_history(
                 application, actor, old_status, 'selected',
                 note or 'Offer withdrawn; application returned to selected.',
+                stage_code=STAGE_CLIENT_APPROVED,
             )
 
     return offer
@@ -232,12 +230,10 @@ def expire_offer(offer, actor=None, note='') -> Offer:
         offer.status = 'expired'
         offer.save(update_fields=['status'])
 
-        application.status = 'selected'
-        application.save(update_fields=['status'])
-
         _record_app_history(
             application, actor, old_status, 'selected',
             note or 'Offer expired; candidate remains selected for re-offer or manual action.',
+            stage_code=STAGE_CLIENT_APPROVED,
         )
 
     return offer

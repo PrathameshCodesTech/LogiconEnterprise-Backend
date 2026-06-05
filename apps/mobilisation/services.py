@@ -4,8 +4,9 @@ apps/mobilisation/services.py
 Finalization service for MobilisationSetupRequest.
 
 All mobilisation is sales-led. Client/Sites/SRRs/BudgetPlan already exist
-(created during convert_won_sales_lead_to_onboarding_setup). Finalization only
-creates departments and users from proposed setup records.
+(created during convert_won_sales_lead_to_onboarding_setup). Finalization creates
+client users from proposed setup records. Proposed departments remain as legacy
+configuration data but are not required for client onboarding.
 """
 
 import logging
@@ -39,19 +40,15 @@ def _check_sales_led_mobilisation(req, errors, warnings):
     if req.client_id is None:
         errors.append("Sales-led mobilisation requires a client to be set (created during lead conversion).")
 
-    dept_count = req.proposed_departments.filter(is_active=True).count()
-    if dept_count == 0:
-        errors.append("Add at least one active proposed department.")
-    else:
-        for dept in req.proposed_departments.filter(is_active=True, scope_level='site'):
-            if dept.real_site_id is None:
-                errors.append(
-                    f"Proposed department '{dept.code}' is site-level but has no real_site assigned."
-                )
-            elif req.client_id and dept.real_site.client_id != req.client_id:
-                errors.append(
-                    f"Proposed department '{dept.code}' references a site from a different client."
-                )
+    for dept in req.proposed_departments.filter(is_active=True, scope_level='site'):
+        if dept.real_site_id is None:
+            warnings.append(
+                f"Legacy proposed department '{dept.code}' is site-level but has no real_site assigned."
+            )
+        elif req.client_id and dept.real_site.client_id != req.client_id:
+            warnings.append(
+                f"Legacy proposed department '{dept.code}' references a site from a different client."
+            )
 
     user_count = req.proposed_users.filter(is_active=True).count()
     if user_count == 0:
@@ -76,23 +73,6 @@ def _check_sales_led_mobilisation(req, errors, warnings):
         if site_count == 0:
             warnings.append("The client has no active sites yet.")
 
-        from apps.sites.models import SiteRoleRequirement
-        active_srr_ids = set(SiteRoleRequirement.objects.filter(
-            site__client_id=req.client_id,
-            site__is_active=True,
-            is_active=True,
-        ).values_list('id', flat=True))
-        if active_srr_ids:
-            assigned_srr_ids = set(req.proposed_department_roles.filter(
-                is_active=True,
-                proposed_department__is_active=True,
-            ).values_list('site_role_requirement_id', flat=True))
-            missing_ids = sorted(active_srr_ids - assigned_srr_ids)
-            if missing_ids:
-                errors.append(
-                    f"Assign every active site role requirement to a proposed department "
-                    f"before completing setup. Missing SRR ids: {', '.join(map(str, missing_ids))}."
-                )
 
 
 # ─── Preflight ────────────────────────────────────────────────────────────────
@@ -108,16 +88,6 @@ def validate_mobilisation_finalization_preflight(request) -> list:
     from apps.accounts.models import User as UserModel
 
     errors = []
-
-    for p_dept in request.proposed_departments.filter(is_active=True, scope_level='site'):
-        if p_dept.real_site_id is None:
-            errors.append(
-                f"Proposed department '{p_dept.code}' is site-level but has no real_site."
-            )
-        elif request.client_id and p_dept.real_site.client_id != request.client_id:
-            errors.append(
-                f"Proposed department '{p_dept.code}' references a site outside this client."
-            )
 
     for p_user in request.proposed_users.filter(is_active=True):
         if p_user.created_user_id is not None:
@@ -140,7 +110,7 @@ def validate_mobilisation_finalization_preflight(request) -> list:
 
 def finalize_mobilisation_request(request, actor=None):
     """
-    Create real Department/User records from the proposed setup data.
+    Create real client User records from the proposed setup data.
 
     Safe to call inside an existing transaction — uses a raw SAVEPOINT so that a
     finalization failure rolls back only the finalization work; the outer transaction
@@ -203,29 +173,14 @@ def _do_finalize(request, actor):
     """
     Core finalization logic. Must be called inside a savepoint / transaction.
     Client/Sites/SRRs/BudgetPlan already exist (created during lead conversion).
-    Creates only departments and users from proposed records.
+    Creates only client users from proposed records. Departments and SRR
+    department mappings are legacy setup data and are not materialized here.
     """
     client = request.client
     if client is None:
         raise MobilisationFinalizationError(
             "Mobilisation has no client attached. Ensure lead conversion completed successfully."
         )
-
-    dept_map = {}
-    for p_dept in request.proposed_departments.filter(is_active=True).select_related('real_site'):
-        real_site = p_dept.real_site if p_dept.scope_level == 'site' else None
-        dept = _create_department(p_dept, client, real_site, request.org)
-        dept_map[p_dept.pk] = dept
-
-    for mapping in request.proposed_department_roles.filter(is_active=True).select_related(
-        'proposed_department', 'site_role_requirement',
-    ):
-        dept = dept_map.get(mapping.proposed_department_id)
-        if dept is None:
-            continue
-        srr = mapping.site_role_requirement
-        srr.department = dept
-        srr.save(update_fields=['department', 'updated_at'])
 
     for p_user in request.proposed_users.filter(is_active=True).select_related(
         'access_role', 'real_site__scope_node',
@@ -405,7 +360,7 @@ def assign_operations_owner(request, owner, actor=None):
             actor=actor,
             org=request.org,
             title=f'Mobilisation assigned: {request.client.name}',
-            message='Complete departments, users, and setup readiness.',
+            message='Complete client users and setup readiness.',
             notification_type='mobilisation_operations_assigned',
             target_type='mobilisation',
             target_id=request.pk,
@@ -1154,12 +1109,10 @@ def get_mobilisation_sales_context(request):
     - sites: list of sites with headcount and roles
     - budget_lines: list of budget line items
     - proposal_versions: list of all proposal versions with client remarks
-    - readiness: department/user counts vs expected
+    - readiness: client user setup counts vs expected
 
     Safe for missing source_sales_lead or source_proposal_version.
     """
-    from django.db.models import Sum
-
     # ─── Mobilisation info ─────────────────────────────────────────────────
     mobilisation_data = {
         'id': request.id,
@@ -1300,29 +1253,18 @@ def get_mobilisation_sales_context(request):
             })
 
     # ─── Readiness stats ───────────────────────────────────────────────────
-    # Calculate expected vs created departments and users
+    # Calculate expected vs created client users. Departments are no longer a
+    # required client-side setup artifact; sites and SRRs already exist from the
+    # sales conversion flow.
     expected_departments = 0
     expected_users = 0
 
-    # Expected departments: one per site (from sales lead sites)
-    if lead:
-        from apps.sales.models import SalesLeadSite
-        expected_departments = SalesLeadSite.objects.filter(lead=lead, is_active=True).count()
-        # Minimum 1 department (for client-level)
-        if expected_departments == 0:
-            expected_departments = 1
-
-    # Expected users: sum of manpower from role requirements
-    if lead:
-        from apps.sales.models import SalesRoleRequirement
-        manpower_sum = SalesRoleRequirement.objects.filter(
-            lead=lead, is_active=True
-        ).aggregate(total=Sum('manpower_count'))['total'] or 0
-        # At least 1 user (primary contact)
-        expected_users = max(manpower_sum, 1)
+    if request.client_id:
+        # At least one client user/contact is needed to use the client portal.
+        expected_users = 1
 
     # Created counts from proposed records
-    created_departments = request.proposed_departments.filter(is_active=True).count()
+    created_departments = 0
     created_users = request.proposed_users.filter(is_active=True).count()
 
     readiness_data = {
@@ -1333,9 +1275,7 @@ def get_mobilisation_sales_context(request):
         'missing_departments': max(0, expected_departments - created_departments),
         'missing_users': max(0, expected_users - created_users),
         'ready_to_finalize': (
-            created_departments >= expected_departments
-            and created_users >= expected_users
-            and expected_departments > 0
+            created_users >= expected_users
             and expected_users > 0
         ),
     }

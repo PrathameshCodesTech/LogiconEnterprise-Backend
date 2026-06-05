@@ -12,7 +12,7 @@ from rest_framework.exceptions import ValidationError
 from .models import Employee, SiteDeployment
 
 
-_ALLOWED_STATUSES = {'selected', 'offer_accepted'}
+_ALLOWED_STATUSES = {'offer_accepted'}
 
 _BLOCKED_STATUSES = {
     'draft', 'shortlisted', 'client_review',
@@ -43,7 +43,7 @@ def convert_hiring_application_to_deployment(
     allow_existing_employee=False,
 ):
     """
-    Convert a selected/offer-accepted HiringApplication into an Employee +
+    Convert an offer-accepted HiringApplication into an Employee +
     SiteDeployment, updating the application status and candidate lifecycle.
 
     Returns:
@@ -89,7 +89,9 @@ def convert_hiring_application_to_deployment(
                 )
             })
     except _Offer.DoesNotExist:
-        pass  # no offer attached — allowed via selected/offer_accepted path
+        raise ValidationError({
+            'non_field_errors': 'Accepted offer is required before deployment.'
+        })
 
     # ── Guard: allowed statuses ───────────────────────────────────────────────
     if application.status not in _ALLOWED_STATUSES:
@@ -192,31 +194,13 @@ def convert_hiring_application_to_deployment(
         )
 
         # ── HiringApplication update ──────────────────────────────────────────
-        from apps.hiring.models import ApplicationStageHistory, PipelineStage
+        from apps.hiring.lifecycle import STAGE_DEPLOYED, transition_application
 
-        old_stage = application.current_stage
-        old_status = application.status
-
-        terminal_stage = (
-            PipelineStage.objects.filter(
-                org=org, is_active=True,
-                stage_type__in=['onboarding', 'offer'],
-                is_terminal=True,
-            ).order_by('order').first()
-        )
-        new_stage = terminal_stage or old_stage
-
-        application.status = 'deployed'
-        application.current_stage = new_stage
-        application.save(update_fields=['status', 'current_stage'])
-
-        ApplicationStageHistory.objects.create(
-            hiring_application=application,
-            from_stage=old_stage,
-            to_stage=new_stage,
-            from_status=old_status,
-            to_status='deployed',
-            moved_by=actor,
+        transition_application(
+            application,
+            actor=actor,
+            status='deployed',
+            stage_code=STAGE_DEPLOYED,
             comment='Converted to employee/deployment.',
         )
 

@@ -27,6 +27,12 @@ class MRFLineItemSerializer(serializers.ModelSerializer):
     effective_wage_min = serializers.SerializerMethodField()
     effective_wage_max = serializers.SerializerMethodField()
     commercial_overridden_by_name = serializers.SerializerMethodField()
+    approved_billing_rate = serializers.SerializerMethodField()
+    requested_billing_rate = serializers.SerializerMethodField()
+    billing_rate_variance = serializers.SerializerMethodField()
+    is_over_approved_billing_rate = serializers.SerializerMethodField()
+    line_approved_amount = serializers.SerializerMethodField()
+    line_requested_amount = serializers.SerializerMethodField()
 
     budget_plan_name = serializers.CharField(source='budget_plan.name', read_only=True, default=None)
     budget_plan_code = serializers.CharField(source='budget_plan.code', read_only=True, default=None)
@@ -78,6 +84,9 @@ class MRFLineItemSerializer(serializers.ModelSerializer):
             'commercial_overridden_by', 'commercial_overridden_by_name', 'commercial_overridden_at',
             # effective (resolved) values
             'effective_wage_min', 'effective_wage_max',
+            'approved_billing_rate', 'requested_billing_rate',
+            'billing_rate_variance', 'is_over_approved_billing_rate',
+            'line_approved_amount', 'line_requested_amount',
             'budget_plan', 'budget_plan_name', 'budget_plan_code',
             'budget_plan_amount', 'budget_plan_currency', 'budget_plan_status', 'budget_plan_nature',
             'site_role_requirement_label', 'srr_department_name',
@@ -123,6 +132,51 @@ class MRFLineItemSerializer(serializers.ModelSerializer):
             return obj.commercial_overridden_by.username
         return None
 
+    def _approved_billing_rate_value(self, obj):
+        if obj.master_billing_rate_snapshot is not None:
+            return obj.master_billing_rate_snapshot
+        if obj.site_role_requirement_id and obj.site_role_requirement.billing_rate is not None:
+            return obj.site_role_requirement.billing_rate
+        return None
+
+    @staticmethod
+    def _money(value):
+        from decimal import Decimal
+        if value is None:
+            return None
+        return str(Decimal(value).quantize(Decimal('0.01')))
+
+    def get_approved_billing_rate(self, obj):
+        return self._money(self._approved_billing_rate_value(obj))
+
+    def get_requested_billing_rate(self, obj):
+        return self._money(obj.billing_rate_snapshot)
+
+    def get_billing_rate_variance(self, obj):
+        approved = self._approved_billing_rate_value(obj)
+        requested = obj.billing_rate_snapshot
+        if approved is None or requested is None:
+            return None
+        return self._money(requested - approved)
+
+    def get_is_over_approved_billing_rate(self, obj):
+        approved = self._approved_billing_rate_value(obj)
+        requested = obj.billing_rate_snapshot
+        if approved is None or requested is None:
+            return False
+        return requested > approved
+
+    def get_line_approved_amount(self, obj):
+        approved = self._approved_billing_rate_value(obj)
+        if approved is None or not obj.headcount:
+            return None
+        return self._money(approved * obj.headcount)
+
+    def get_line_requested_amount(self, obj):
+        if obj.billing_rate_snapshot is None or not obj.headcount:
+            return None
+        return self._money(obj.billing_rate_snapshot * obj.headcount)
+
 
 def _detect_commercial_override(data, snapshot):
     """Return True if any commercial field in data diverges from the SRR snapshot."""
@@ -142,6 +196,28 @@ def _detect_commercial_override(data, snapshot):
         or _neq('wage_max_requested', 'wage_max')
         or _neq('billing_rate_snapshot', 'billing_rate')
     )
+
+
+def _changed_commercial_fields(data, snapshot):
+    """Return commercial field names whose provided value differs from the SRR snapshot."""
+    from decimal import Decimal
+
+    changed = set()
+    field_map = {
+        'wage_min_requested': 'wage_min',
+        'wage_max_requested': 'wage_max',
+        'billing_rate_snapshot': 'billing_rate',
+    }
+    for field, snap_key in field_map.items():
+        if field not in data:
+            continue
+        val = data[field]
+        snap = snapshot.get(snap_key)
+        if val is None or snap is None:
+            continue
+        if Decimal(str(val)) != Decimal(str(snap)):
+            changed.add(field)
+    return changed
 
 
 class MRFLineItemWriteSerializer(serializers.ModelSerializer):
@@ -263,6 +339,19 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
             override_detected = _detect_commercial_override(data, snapshot)
             user = self.context.get('request').user if self.context.get('request') else None
             if override_detected:
+                changed_fields = _changed_commercial_fields(data, snapshot)
+                client_rate_exception = (
+                    mrf.requested_by_type == 'client'
+                    and changed_fields == {'billing_rate_snapshot'}
+                )
+                if client_rate_exception:
+                    data['commercial_override_reason'] = (
+                        str(data.get('commercial_override_reason') or '').strip()
+                        or 'Client requested billing rate differs from approved budget rate.'
+                    )
+                    self._override_result = {'detected': True, 'user': user, 'in_payload': True}
+                    return data
+
                 user_caps = get_user_capabilities(user) if user else []
                 if MRF_OVERRIDE_COMMERCIALS not in user_caps:
                     raise serializers.ValidationError(
@@ -565,6 +654,8 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             'support_requirement',
         ]
         extra_kwargs = {
+            'mrf_type': {'required': False},
+            'billing_type': {'required': False},
             'budget_plan': {'required': False, 'allow_null': True},
             'request_number': {'required': False},
             'experience_min_years': {'required': False, 'allow_null': True},
@@ -613,6 +704,12 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             data['requested_by_type'] = 'client'
             data['billing_type'] = 'billable'
             data['client_visible'] = True
+            data['mrf_type'] = data.get('mrf_type') or (
+                instance.mrf_type if instance else 'new_hiring'
+            )
+            data['requesting_department'] = None
+            data['required_department'] = None
+            data['department'] = ''
 
         site = data.get('site') or (instance.site if instance else None)
         requesting_department = data.get(
@@ -649,6 +746,12 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             errors['mrf_type'] = (
                 "Client-requested MRFs cannot use 'rate_revision'."
             )
+        elif not mrf_type:
+            errors['mrf_type'] = 'mrf_type is required.'
+
+        billing_type = data.get('billing_type', instance.billing_type if instance else None)
+        if not billing_type:
+            errors['billing_type'] = 'billing_type is required.'
 
         # ── request_number uniqueness (belt-and-suspenders over DB constraint) ─
         request_number = data.get(

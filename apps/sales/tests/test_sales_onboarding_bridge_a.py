@@ -206,6 +206,13 @@ class TestConversionCreatesRealRecords(TestCase):
         site = SiteProfile.objects.get(code=f'sts{self.lead_site.pk}')
         self.assertTrue(SiteRoleRequirement.objects.filter(site=site).exists())
 
+    def test_created_srr_uses_approved_proposal_unit_cost_as_billing_rate(self):
+        convert_won_sales_lead_to_onboarding_setup(self.lead, self.user)
+        site = SiteProfile.objects.get(code=f'sts{self.lead_site.pk}')
+        srr = SiteRoleRequirement.objects.get(site=site)
+        budget_line = self.proposal.budget_lines.get(role_requirement__isnull=False)
+        self.assertEqual(srr.billing_rate, budget_line.unit_cost)
+
     def test_creates_budget_plan(self):
         convert_won_sales_lead_to_onboarding_setup(self.lead, self.user)
         self.assertTrue(BudgetPlan.objects.filter(
@@ -329,12 +336,8 @@ class TestSalesLedReadinessOk(TestCase):
         self.user = _user('sm_sro', self.org, self.role, self.n)
         self.lead, self.proposal, _ = _won_lead_with_proposal(self.org, self.user)
         self.req = convert_won_sales_lead_to_onboarding_setup(self.lead, self.user)
-        # Add required dept + user
+        # Add required client user. Departments are not required for client setup.
         self.access_role = _access_role(self.org)
-        MobilisationProposedDepartment.objects.create(
-            request=self.req, name='Security', code='SEC', scope_level='client',
-        )
-        _map_all_site_role_requirements(self.req)
         MobilisationProposedUser.objects.create(
             request=self.req, full_name='Alice', email='alice@acme.com',
             user_type='client', access_role=self.access_role, scope_level='client',
@@ -356,7 +359,7 @@ class TestSalesLedReadinessErrors(TestCase):
         self.role = _role(self.org, 'sm', _all_sales_caps())
         self.user = _user('sm_sre', self.org, self.role, self.n)
 
-    def test_errors_when_no_dept_no_user(self):
+    def test_errors_when_no_user(self):
         req = MobilisationSetupRequest.objects.create(
             org=self.org,
             requested_by=self.user,
@@ -365,7 +368,6 @@ class TestSalesLedReadinessErrors(TestCase):
         )
         ok, errors, _ = check_mobilisation_readiness(req)
         self.assertFalse(ok)
-        self.assertTrue(any('department' in e.lower() for e in errors))
         self.assertTrue(any('user' in e.lower() for e in errors))
 
     def test_errors_when_no_client(self):
@@ -390,10 +392,6 @@ class TestSalesLedReadinessWarnings(TestCase):
         self.lead, self.proposal, _ = _won_lead_with_proposal(self.org, self.user)
         self.req = convert_won_sales_lead_to_onboarding_setup(self.lead, self.user)
         self.access_role = _access_role(self.org)
-        MobilisationProposedDepartment.objects.create(
-            request=self.req, name='Sec', code='SEC2', scope_level='client',
-        )
-        _map_all_site_role_requirements(self.req)
         MobilisationProposedUser.objects.create(
             request=self.req, full_name='Bob', email='bob@acme.com',
             user_type='client', access_role=self.access_role, scope_level='client',
@@ -417,9 +415,6 @@ class TestSalesLedFinalization(TestCase):
         self.lead, self.proposal, _ = _won_lead_with_proposal(self.org, self.user)
         self.req = convert_won_sales_lead_to_onboarding_setup(self.lead, self.user)
         self.access_role = _access_role(self.org)
-        MobilisationProposedDepartment.objects.create(
-            request=self.req, name='Ops', code='OPS', scope_level='client',
-        )
         MobilisationProposedUser.objects.create(
             request=self.req, full_name='Carol', email='carol@acme.com',
             user_type='client', access_role=self.access_role, scope_level='client',
@@ -428,12 +423,13 @@ class TestSalesLedFinalization(TestCase):
         self.req.status = 'approved'
         self.req.save(update_fields=['status'])
 
-    def test_finalization_creates_department(self):
+    def test_finalization_does_not_create_department(self):
         from apps.core.models import Department
+        initial_count = Department.objects.filter(org=self.org).count()
         finalize_mobilisation_request(self.req, actor=self.user)
         self.req.refresh_from_db()
         self.assertEqual(self.req.finalization_status, 'finalized')
-        self.assertTrue(Department.objects.filter(org=self.org, code='OPS').exists())
+        self.assertEqual(Department.objects.filter(org=self.org).count(), initial_count)
 
     def test_finalization_creates_user(self):
         finalize_mobilisation_request(self.req, actor=self.user)

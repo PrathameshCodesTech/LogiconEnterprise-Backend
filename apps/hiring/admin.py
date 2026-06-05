@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     HiringApplication, Interview, InterviewFeedback, Offer,
     PipelineStage, ApplicationStageHistory, CandidateMatchResult,
+    InterviewPlan, InterviewPlanRound,
 )
 
 
@@ -24,8 +25,23 @@ class ApplicationStageHistoryInline(admin.TabularInline):
 class InterviewInline(admin.TabularInline):
     model = Interview
     extra = 0
-    fields = ['round_type', 'round_number', 'mode', 'status', 'scheduled_at', 'interviewer']
-    raw_id_fields = ['scheduled_by', 'interviewer']
+    fields = ['planned_round', 'round_type', 'round_number', 'mode', 'status', 'scheduled_at', 'interviewer']
+    raw_id_fields = ['planned_round', 'scheduled_by', 'interviewer']
+
+
+class InterviewPlanRoundInline(admin.TabularInline):
+    model = InterviewPlanRound
+    extra = 0
+    fields = ['round_number', 'round_type', 'mode', 'is_required', 'is_active', 'instructions']
+
+
+@admin.register(InterviewPlan)
+class InterviewPlanAdmin(admin.ModelAdmin):
+    list_display = ['id', 'org', 'job_role', 'name', 'code', 'is_default', 'is_active']
+    list_filter = ['org', 'job_role', 'is_default', 'is_active']
+    search_fields = ['name', 'code', 'job_role__name']
+    raw_id_fields = ['org', 'job_role']
+    inlines = [InterviewPlanRoundInline]
 
 
 @admin.register(HiringApplication)
@@ -43,7 +59,7 @@ class HiringApplicationAdmin(admin.ModelAdmin):
     raw_id_fields = [
         'org', 'candidate', 'mrf', 'mrf_line_item', 'site', 'job_role',
         'source_intake_submission', 'shortlisted_by',
-        'client_decision_by', 'current_stage',
+        'client_decision_by', 'current_stage', 'interview_plan',
     ]
     inlines = [ApplicationStageHistoryInline, InterviewInline]
 
@@ -67,7 +83,7 @@ class InterviewAdmin(admin.ModelAdmin):
     ]
     list_filter = ['round_type', 'status', 'mode']
     readonly_fields = ['created_at', 'updated_at']
-    raw_id_fields = ['hiring_application', 'scheduled_by', 'interviewer']
+    raw_id_fields = ['hiring_application', 'planned_round', 'scheduled_by', 'interviewer']
     inlines = [InterviewFeedbackInline]
 
 

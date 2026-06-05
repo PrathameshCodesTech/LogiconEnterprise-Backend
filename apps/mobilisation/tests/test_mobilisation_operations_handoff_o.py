@@ -67,21 +67,6 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         return lead, proposal, req
 
     def _add_ready_setup(self, req):
-        site = req.client.sites.filter(is_active=True).first()
-        dept = MobilisationProposedDepartment.objects.create(
-            request=req,
-            real_site=site,
-            scope_level='site',
-            name='Operations',
-            code='ops',
-        )
-        for idx, srr in enumerate(site.role_requirements.filter(is_active=True), start=1):
-            MobilisationProposedDepartmentRole.objects.create(
-                request=req,
-                proposed_department=dept,
-                site_role_requirement=srr,
-                sort_order=idx,
-            )
         MobilisationProposedUser.objects.create(
             request=req,
             full_name='Client Admin',
@@ -148,7 +133,7 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         )
 
         self.assertEqual(resp.status_code, 400)
-        self.assertIn('Add at least one active proposed department', resp.data['detail'])
+        self.assertIn('Add at least one active proposed user', resp.data['detail'])
 
     def test_mark_setup_completed_sets_completion_fields(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
@@ -370,7 +355,7 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         ).exists())
         self.assertEqual(req.proposed_department_roles.filter(is_active=True).count(), 1)
 
-    def test_mark_setup_completed_blocks_unassigned_site_role_requirements(self):
+    def test_mark_setup_completed_does_not_require_srr_department_assignments(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
         site = req.client.sites.filter(is_active=True).first()
         MobilisationProposedDepartment.objects.create(
@@ -397,18 +382,15 @@ class MobilisationOperationsHandoffTestCase(TestCase):
             format='json',
         )
 
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn('Assign every active site role requirement', resp.data['detail'])
+        self.assertEqual(resp.status_code, 200)
+        req.refresh_from_db()
+        self.assertEqual(req.status, 'setup_completed')
 
-    def test_finalization_assigns_real_department_to_site_role_requirement(self):
+    def test_finalization_creates_client_users_without_srr_departments(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
         req.mobilisation_requires_approval = False
         req.save(update_fields=['mobilisation_requires_approval', 'updated_at'])
-        self.client.post(
-            f'/api/mobilisation/setup-requests/{req.pk}/setup-builder/apply-template/',
-            {'setup_strategy': 'simple'},
-            format='json',
-        )
+        self._add_ready_setup(req)
         self.client.post(
             f'/api/mobilisation/setup-requests/{req.pk}/mark-setup-completed/',
             {},
@@ -424,5 +406,5 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         self.assertEqual(resp.status_code, 200)
         srr = req.client.sites.first().role_requirements.first()
         srr.refresh_from_db()
-        self.assertIsNotNone(srr.department_id)
-        self.assertEqual(srr.department.site_id, srr.site_id)
+        self.assertIsNone(srr.department_id)
+        self.assertEqual(req.proposed_users.filter(created_user__isnull=False).count(), 1)

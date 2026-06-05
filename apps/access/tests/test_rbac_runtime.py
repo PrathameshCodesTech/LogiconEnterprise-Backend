@@ -131,6 +131,12 @@ class TestDBCapabilityResolution(RBACRuntimeBase):
         self.assertTrue(user_has_capability(user, 'client.read'))
         self.assertFalse(user_has_capability(user, 'mrf.read'))
 
+    def test_client_facing_role_presets_do_not_include_department_read(self):
+        """Client portal roles should not expose internal department setup."""
+        for role_code in ('client_admin', 'client_site_user', 'site_supervisor', 'client_user'):
+            with self.subTest(role_code=role_code):
+                self.assertNotIn('department.read', ROLE_CAPABILITIES.get(role_code, []))
+
 
 # ─── API-level enforcement ─────────────────────────────────────────────────────
 

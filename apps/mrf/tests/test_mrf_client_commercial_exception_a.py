@@ -265,6 +265,78 @@ class TestMRFClientCommercialExceptionA(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn('override', str(resp.data).lower())
 
+    def test_client_requested_mrf_can_edit_billing_rate_without_reason(self):
+        mrf = _mrf(self.org, self.site, self.user_no_cap)
+        mrf.requested_by_type = 'client'
+        mrf.save(update_fields=['requested_by_type'])
+
+        c = self._api(self.user_no_cap)
+        resp = c.post(
+            LINE_ITEMS_URL,
+            {
+                'mrf': mrf.pk,
+                'site_role_requirement': self.srr.pk,
+                'job_role': self.job_role.pk,
+                'headcount': 2,
+                'billing_rate_snapshot': '750.00',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        li = MRFLineItem.objects.get(pk=resp.data['id'])
+        self.assertTrue(li.commercial_override_enabled)
+        self.assertEqual(
+            li.commercial_override_reason,
+            'Client requested billing rate differs from approved budget rate.',
+        )
+        self.assertEqual(li.commercial_overridden_by, self.user_no_cap)
+        self.assertEqual(li.master_billing_rate_snapshot, Decimal('500.00'))
+        self.assertEqual(li.billing_rate_snapshot, Decimal('750.00'))
+
+    def test_client_requested_mrf_cannot_edit_wage_without_override_permission(self):
+        mrf = _mrf(self.org, self.site, self.user_no_cap)
+        mrf.requested_by_type = 'client'
+        mrf.save(update_fields=['requested_by_type'])
+
+        c = self._api(self.user_no_cap)
+        resp = c.post(
+            LINE_ITEMS_URL,
+            {
+                'mrf': mrf.pk,
+                'site_role_requirement': self.srr.pk,
+                'job_role': self.job_role.pk,
+                'headcount': 2,
+                'wage_min_requested': '400.00',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('override', str(resp.data).lower())
+
+    def test_line_item_read_exposes_approved_requested_and_variance_amounts(self):
+        li = MRFLineItem.objects.create(
+            mrf=self.mrf,
+            site_role_requirement=self.srr,
+            job_role=self.job_role,
+            headcount=2,
+            master_billing_rate_snapshot=Decimal('500.00'),
+            billing_rate_snapshot=Decimal('750.00'),
+            commercial_override_enabled=True,
+        )
+
+        c = self._api(self.user_client_admin)
+        resp = c.get(f'{LINE_ITEMS_URL}{li.pk}/')
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['approved_billing_rate'], '500.00')
+        self.assertEqual(resp.data['requested_billing_rate'], '750.00')
+        self.assertEqual(resp.data['billing_rate_variance'], '250.00')
+        self.assertTrue(resp.data['is_over_approved_billing_rate'])
+        self.assertEqual(resp.data['line_approved_amount'], '1000.00')
+        self.assertEqual(resp.data['line_requested_amount'], '1500.00')
+
     # ── 7. Master snapshots unchanged after override ──────────────────────────
 
     def test_master_snapshots_unchanged_after_client_override(self):

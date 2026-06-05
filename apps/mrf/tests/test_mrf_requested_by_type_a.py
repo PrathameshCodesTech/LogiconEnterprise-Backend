@@ -40,7 +40,7 @@ from apps.access.capabilities import (
 from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
-from apps.core.models import Organization, ScopeNode
+from apps.core.models import Department, Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest
 from apps.sites.models import Client, SiteProfile
@@ -306,6 +306,34 @@ class TestRequestedByTypeEnforcement(TestCase):
         self.assertEqual(mrf.requested_by_type, 'client')
         self.assertEqual(mrf.billing_type, 'billable')
         self.assertTrue(mrf.client_visible)
+
+    def test_client_facing_user_mrf_clears_department_fields(self):
+        dept = Department.objects.create(
+            org=self.org,
+            client=self.client,
+            name='Legacy Client Admin',
+            code='legacy-client-admin',
+        )
+        self.client_user.department = dept
+        self.client_user.save(update_fields=['department'])
+
+        resp = self._api(self.client_user).post(
+            MRF_URL,
+            {
+                **_mrf_payload(self.site),
+                'requesting_department': dept.pk,
+                'required_department': dept.pk,
+                'department': 'Legacy display text',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        mrf = ManpowerRequest.objects.get(pk=resp.data['id'])
+        self.assertEqual(mrf.requested_by_type, 'client')
+        self.assertIsNone(mrf.requesting_department_id)
+        self.assertIsNone(mrf.required_department_id)
+        self.assertEqual(mrf.department, '')
 
     def test_client_requested_rate_revision_is_rejected(self):
         resp = self._api(self.internal_user).post(

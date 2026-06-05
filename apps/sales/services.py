@@ -968,8 +968,18 @@ def _create_sites_from_lead(lead, client, actor, proposal=None):
 
 def _create_srrs_from_lead(lead, site_map, proposal=None):
     from apps.sites.models import SiteRoleRequirement
-    from apps.sales.models import SalesRoleRequirement
+    from apps.sales.models import ProposalBudgetLine, SalesRoleRequirement
     from datetime import date
+
+    budget_line_by_role_requirement = {}
+    if proposal is not None:
+        budget_line_by_role_requirement = {
+            line.role_requirement_id: line
+            for line in ProposalBudgetLine.objects.filter(
+                proposal_version=proposal,
+                role_requirement__isnull=False,
+            )
+        }
 
     for req in SalesRoleRequirement.objects.filter(lead=lead, is_active=True).select_related(
         'job_role', 'wage_category', 'site',
@@ -977,10 +987,12 @@ def _create_srrs_from_lead(lead, site_map, proposal=None):
         real_site = site_map.get(req.site_id)
         if real_site is None:
             continue
+        budget_line = budget_line_by_role_requirement.get(req.pk)
         SiteRoleRequirement.objects.create(
             site=real_site,
             job_role=req.job_role,
             approved_headcount=req.manpower_count,
+            billing_rate=budget_line.unit_cost if budget_line is not None else None,
             shift_hours=req.shift_hours,
             wage_category=req.wage_category,
             effective_from=date.today(),

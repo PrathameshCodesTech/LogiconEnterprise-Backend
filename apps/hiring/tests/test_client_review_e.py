@@ -22,7 +22,7 @@ from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode
 from apps.deployment.services import convert_hiring_application_to_deployment
 from apps.hiring.models import (
-    ApplicationStageHistory, HiringApplication, PipelineStage,
+    ApplicationStageHistory, HiringApplication, Offer, PipelineStage,
 )
 from apps.hiring.serializers import ClientReviewApplicationSerializer
 from apps.jobs.models import JobRole
@@ -103,9 +103,11 @@ class ClientReviewBase(TestCase):
 
         cls.r_admin = _role(cls.org, 'hr_admin')
         cls.r_exec = _role(cls.org, 'hr_executive')
+        cls.r_client_admin = _role(cls.org, 'client_admin')
 
         cls.hr_admin = _user('cre_admin', cls.org, cls.r_admin, cls.n_co)
         cls.hr_exec = _user('cre_exec', cls.org, cls.r_exec, cls.n_co)
+        cls.client_admin = _user('cre_client_admin', cls.org, cls.r_client_admin, cls.n_cl)
         cls.superuser = _user('cre_super', cls.org, is_superuser=True)
 
         cls.job_role = JobRole.objects.create(
@@ -142,6 +144,15 @@ class ClientReviewBase(TestCase):
     def _client_review_list_url(self):
         return '/api/hiring/client-review/'
 
+    def _applications_list_url(self):
+        return '/api/hiring/applications/'
+
+    def _application_detail_url(self, app_id):
+        return f'/api/hiring/applications/{app_id}/'
+
+    def _demands_list_url(self):
+        return '/api/hiring/demands/'
+
     def _convert_url(self, app_id):
         return f'/api/hiring/applications/{app_id}/convert-to-deployment/'
 
@@ -156,6 +167,16 @@ class ClientReviewBase(TestCase):
             app_status=app_status, **kwargs,
         )
 
+    def _accept_offer(self, app):
+        Offer.objects.create(
+            hiring_application=app,
+            offered_ctc='300000.00',
+            status='accepted',
+        )
+        app.status = 'offer_accepted'
+        app.save(update_fields=['status'])
+        return app
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Group 1 — Send-to-client-review (1-4)
@@ -166,6 +187,10 @@ class TestSendToClientReview(ClientReviewBase):
     def test_01_send_sets_visible_pending_status_and_history(self):
         """POST send-to-client-review sets client_visible, client_decision=pending, moves to client_review."""
         app = self._make_app('0101', 'shortlisted')
+        PipelineStage.objects.create(
+            org=self.org, name='Client Review', code='client_review',
+            order=20, stage_type='screening',
+        )
         self._auth(self.hr_admin)
         resp = self.api.post(self._send_url(app.pk), {'note': 'Please review'}, format='json')
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -174,6 +199,7 @@ class TestSendToClientReview(ClientReviewBase):
         self.assertTrue(app.client_visible)
         self.assertEqual(app.client_decision, 'pending')
         self.assertEqual(app.status, 'client_review')
+        self.assertEqual(app.current_stage.code, 'client_review')
 
         self.assertTrue(
             ApplicationStageHistory.objects.filter(
@@ -285,6 +311,10 @@ class TestClientDecision(ClientReviewBase):
         """client_decision=approved moves status from client_review → selected."""
         app = self._make_app('0901', 'client_review',
                              client_visible=True, client_decision='pending')
+        PipelineStage.objects.create(
+            org=self.org, name='Client Approved', code='client_approved',
+            order=30, stage_type='screening',
+        )
         self._auth(self.hr_admin)
         resp = self.api.post(
             self._decision_url(app.pk),
@@ -295,6 +325,7 @@ class TestClientDecision(ClientReviewBase):
         app.refresh_from_db()
         self.assertEqual(app.client_decision, 'approved')
         self.assertEqual(app.status, 'selected')
+        self.assertEqual(app.current_stage.code, 'client_approved')
         self.assertIsNotNone(app.client_decision_at)
         self.assertEqual(app.client_decision_note, 'Looks good')
 
@@ -302,6 +333,10 @@ class TestClientDecision(ClientReviewBase):
         """client_decision=rejected moves status to rejected."""
         app = self._make_app('1001', 'client_review',
                              client_visible=True, client_decision='pending')
+        PipelineStage.objects.create(
+            org=self.org, name='Rejected / Closed', code='rejected_closed',
+            order=80, stage_type='onboarding', is_terminal=True,
+        )
         self._auth(self.hr_admin)
         resp = self.api.post(
             self._decision_url(app.pk),
@@ -312,6 +347,7 @@ class TestClientDecision(ClientReviewBase):
         app.refresh_from_db()
         self.assertEqual(app.client_decision, 'rejected')
         self.assertEqual(app.status, 'rejected')
+        self.assertEqual(app.current_stage.code, 'rejected_closed')
 
     def test_11_client_decision_creates_stage_history(self):
         """client_decision creates an ApplicationStageHistory entry."""
@@ -340,6 +376,51 @@ class TestClientDecision(ClientReviewBase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_12b_client_admin_can_list_and_decide_visible_application(self):
+        """Client-facing users can review and decide applications in their scope."""
+        app = self._make_app('1202', 'client_review',
+                             client_visible=True, client_decision='pending')
+        self._auth(self.client_admin)
+
+        list_resp = self.api.get(self._client_review_list_url())
+        self.assertEqual(list_resp.status_code, 200, list_resp.data)
+        results = list_resp.data.get('results', list_resp.data)
+        self.assertIn(app.pk, [row['id'] for row in results])
+
+        decision_resp = self.api.post(
+            self._decision_url(app.pk),
+            {'decision': 'approved', 'note': 'Approved by client'},
+            format='json',
+        )
+        self.assertEqual(decision_resp.status_code, 200, decision_resp.data)
+        app.refresh_from_db()
+        self.assertEqual(app.client_decision, 'approved')
+        self.assertEqual(app.status, 'selected')
+
+    def test_12c_client_admin_cannot_use_internal_hiring_surfaces(self):
+        """Client users use client-review only; generic hiring pages are internal."""
+        app = self._make_app('1203', 'client_review',
+                             client_visible=True, client_decision='pending')
+        self._auth(self.client_admin)
+
+        review_resp = self.api.get(self._client_review_list_url())
+        self.assertEqual(review_resp.status_code, 200, review_resp.data)
+        review_results = review_resp.data.get('results', review_resp.data)
+        self.assertIn(app.pk, [row['id'] for row in review_results])
+
+        generic_resp = self.api.get(self._applications_list_url())
+        self.assertEqual(generic_resp.status_code, 200, generic_resp.data)
+        generic_results = generic_resp.data.get('results', generic_resp.data)
+        self.assertNotIn(app.pk, [row['id'] for row in generic_results])
+
+        detail_resp = self.api.get(self._application_detail_url(app.pk))
+        self.assertEqual(detail_resp.status_code, 404)
+
+        demands_resp = self.api.get(self._demands_list_url())
+        self.assertEqual(demands_resp.status_code, 200, demands_resp.data)
+        demand_results = demands_resp.data.get('results', demands_resp.data)
+        self.assertEqual(len(demand_results), 0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -406,20 +487,22 @@ class TestConversionGuardrail(ClientReviewBase):
         self.assertIn('Client approval', str(ctx.exception))
 
     def test_16_conversion_allowed_if_visible_and_approved(self):
-        """Deployment conversion succeeds when client_visible=True and decision=approved."""
+        """Deployment conversion succeeds when client approves and offer is accepted."""
         from apps.deployment.models import Employee, SiteDeployment
         app = self._make_app('1601', 'selected',
                              client_visible=True, client_decision='approved')
+        self._accept_offer(app)
         result = convert_hiring_application_to_deployment(app, self.superuser)
         self.assertIsInstance(result['employee'], Employee)
         self.assertIsInstance(result['deployment'], SiteDeployment)
 
-    def test_17_conversion_still_allowed_for_non_visible_selected_application(self):
-        """If client_visible=False, internal conversion proceeds normally."""
-        from apps.deployment.models import Employee
+    def test_17_conversion_blocked_without_accepted_offer(self):
+        """Client approval alone is not enough; an accepted offer is required."""
+        from rest_framework.exceptions import ValidationError
         app = self._make_app('1701', 'selected', client_visible=False)
-        result = convert_hiring_application_to_deployment(app, self.superuser)
-        self.assertIsInstance(result['employee'], Employee)
+        with self.assertRaises(ValidationError) as ctx:
+            convert_hiring_application_to_deployment(app, self.superuser)
+        self.assertIn('Accepted offer', str(ctx.exception))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

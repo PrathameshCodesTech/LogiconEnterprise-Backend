@@ -95,10 +95,13 @@ class ManpowerRequestViewSet(ScopedModelViewSet):
         site = serializer.validated_data['site']
         self._check_site_scope(site)
         extra = {}
-        if serializer.validated_data.get('requesting_department') is None:
+        is_client_actor = is_client_facing_user(self.request.user)
+        if not is_client_actor and serializer.validated_data.get('requesting_department') is None:
             extra['requesting_department'] = getattr(self.request.user, 'department', None)
-        if is_client_facing_user(self.request.user):
+        if is_client_actor:
             extra['requested_by_type'] = 'client'
+            extra['requesting_department'] = None
+            extra['required_department'] = None
         serializer.save(org=site.org, requested_by=self.request.user, **extra)
 
     def perform_update(self, serializer):

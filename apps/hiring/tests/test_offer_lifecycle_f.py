@@ -216,6 +216,10 @@ class TestOfferRelease(OfferBase):
     def test_04_release_draft_offer_updates_offer_and_application(self):
         """POST /offers/{id}/release/ moves offer to released and app to offer_released."""
         app = self._make_app('0401', 'selected')
+        PipelineStage.objects.create(
+            org=self.org, name='Offer', code='offer',
+            order=50, stage_type='offer',
+        )
         offer = self._make_offer(app, status='draft')
         self._auth(self.hr_admin)
 
@@ -227,6 +231,7 @@ class TestOfferRelease(OfferBase):
         app.refresh_from_db()
         self.assertEqual(offer.status, 'released')
         self.assertEqual(app.status, 'offer_released')
+        self.assertEqual(app.current_stage.code, 'offer')
         self.assertIsNotNone(offer.released_at)
 
     def test_05_release_creates_application_stage_history(self):
@@ -254,6 +259,10 @@ class TestOfferAcceptDecline(OfferBase):
     def test_06_accept_released_offer_updates_offer_and_application(self):
         """POST /offers/{id}/accept/ moves offer to accepted and app to offer_accepted."""
         app = self._make_app('0601', 'selected')
+        PipelineStage.objects.create(
+            org=self.org, name='Offer Accepted', code='offer_accepted',
+            order=60, stage_type='onboarding',
+        )
         offer = self._make_offer(app, status='released')
         app.status = 'offer_released'
         app.save(update_fields=['status'])
@@ -267,11 +276,16 @@ class TestOfferAcceptDecline(OfferBase):
         app.refresh_from_db()
         self.assertEqual(offer.status, 'accepted')
         self.assertEqual(app.status, 'offer_accepted')
+        self.assertEqual(app.current_stage.code, 'offer_accepted')
         self.assertIsNotNone(offer.accepted_at)
 
     def test_07_decline_released_offer_updates_offer_and_application(self):
         """POST /offers/{id}/decline/ moves offer to declined and app to offer_declined."""
         app = self._make_app('0701', 'selected')
+        PipelineStage.objects.create(
+            org=self.org, name='Rejected / Closed', code='rejected_closed',
+            order=80, stage_type='onboarding', is_terminal=True,
+        )
         offer = self._make_offer(app, status='released')
         app.status = 'offer_released'
         app.save(update_fields=['status'])
@@ -285,6 +299,7 @@ class TestOfferAcceptDecline(OfferBase):
         app.refresh_from_db()
         self.assertEqual(offer.status, 'declined')
         self.assertEqual(app.status, 'offer_declined')
+        self.assertEqual(app.current_stage.code, 'rejected_closed')
         self.assertIsNotNone(offer.declined_at)
 
 

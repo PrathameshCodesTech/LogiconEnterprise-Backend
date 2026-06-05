@@ -133,6 +133,14 @@ class HiringApplication(TimeStampedModel):
         blank=True,
         related_name='current_applications',
     )
+    interview_plan = models.ForeignKey(
+        'hiring.InterviewPlan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='applications',
+        help_text='Selected interview plan for this application, if any.',
+    )
 
     shortlisted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -280,6 +288,91 @@ class CandidateMatchResult(models.Model):
 
 # ─── Interview ────────────────────────────────────────────────────────────────
 
+class InterviewPlan(TimeStampedModel):
+    """Reusable interview-round checklist for a role or organization."""
+
+    org = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='interview_plans',
+    )
+    job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='interview_plans',
+    )
+    name = models.CharField(max_length=128)
+    code = models.CharField(max_length=64)
+    description = models.TextField(blank=True)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = 'Interview Plan'
+        verbose_name_plural = 'Interview Plans'
+        ordering = ['org', 'job_role_id', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['org', 'code'],
+                condition=models.Q(is_active=True),
+                name='unique_active_interview_plan_code_per_org',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['org', 'is_active']),
+            models.Index(fields=['job_role', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.org} - {self.name}"
+
+
+class InterviewPlanRound(TimeStampedModel):
+    """One required or optional round inside an interview plan."""
+
+    plan = models.ForeignKey(
+        InterviewPlan,
+        on_delete=models.CASCADE,
+        related_name='rounds',
+    )
+    round_type = models.CharField(max_length=16, choices=[
+        ('hr', 'HR'),
+        ('technical', 'Technical'),
+        ('manager', 'Manager'),
+        ('client', 'Client'),
+        ('final', 'Final'),
+    ])
+    round_number = models.PositiveIntegerField(default=1)
+    mode = models.CharField(max_length=16, choices=[
+        ('phone', 'Phone'),
+        ('video', 'Video'),
+        ('in_person', 'In Person'),
+    ], default='video')
+    is_required = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    instructions = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'Interview Plan Round'
+        verbose_name_plural = 'Interview Plan Rounds'
+        ordering = ['plan', 'round_number', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['plan', 'round_number'],
+                condition=models.Q(is_active=True),
+                name='unique_active_interview_plan_round_number',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['plan', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.plan} - round {self.round_number} ({self.round_type})"
+
+
 class Interview(TimeStampedModel):
     """A scheduled interview round for a hiring application."""
 
@@ -292,6 +385,7 @@ class Interview(TimeStampedModel):
     ]
 
     STATUS_CHOICES = [
+        ('pending', 'Pending'),
         ('scheduled', 'Scheduled'),
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
@@ -308,6 +402,13 @@ class Interview(TimeStampedModel):
     hiring_application = models.ForeignKey(
         HiringApplication,
         on_delete=models.CASCADE,
+        related_name='interviews',
+    )
+    planned_round = models.ForeignKey(
+        InterviewPlanRound,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='interviews',
     )
     round_type = models.CharField(max_length=16, choices=ROUND_TYPE_CHOICES)

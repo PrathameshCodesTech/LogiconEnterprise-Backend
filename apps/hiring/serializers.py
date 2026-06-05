@@ -12,7 +12,7 @@ from rest_framework import serializers
 from apps.talent.models import Candidate
 
 from .models import (
-    HiringApplication, Interview, InterviewFeedback, Offer,
+    HiringApplication, Interview, InterviewFeedback, InterviewPlan, InterviewPlanRound, Offer,
     PipelineStage, ApplicationStageHistory, CandidateMatchResult,
 )
 
@@ -93,6 +93,7 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
             'mrf', 'site', 'site_name', 'client_name',
             'job_role', 'job_role_name', 'mrf_line_item',
             'current_stage', 'current_stage_name', 'current_stage_code',
+            'interview_plan',
             'status', 'match_score',
             'shortlisted_by', 'shortlisted_at',
             'client_visible', 'client_decision',
@@ -274,11 +275,74 @@ class CandidateMatchResultSerializer(serializers.ModelSerializer):
 
 # ─── Interview / InterviewFeedback / Offer ────────────────────────────────────
 
+class InterviewPlanRoundSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InterviewPlanRound
+        fields = [
+            'id', 'plan', 'round_type', 'round_number', 'mode',
+            'is_required', 'is_active', 'instructions',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class InterviewPlanSerializer(serializers.ModelSerializer):
+    rounds = InterviewPlanRoundSerializer(many=True, required=False)
+    job_role_name = serializers.CharField(source='job_role.name', read_only=True, default=None)
+
+    class Meta:
+        model = InterviewPlan
+        fields = [
+            'id', 'org', 'job_role', 'job_role_name',
+            'name', 'code', 'description',
+            'is_default', 'is_active', 'rounds',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+        extra_kwargs = {
+            'org': {'required': False},
+        }
+
+    def create(self, validated_data):
+        rounds = validated_data.pop('rounds', [])
+        plan = InterviewPlan.objects.create(**validated_data)
+        for round_data in rounds:
+            round_data.pop('plan', None)
+            InterviewPlanRound.objects.create(plan=plan, **round_data)
+        return plan
+
+    def update(self, instance, validated_data):
+        rounds = validated_data.pop('rounds', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if rounds is not None:
+            instance.rounds.update(is_active=False)
+            for round_data in rounds:
+                round_data.pop('plan', None)
+                round_id = round_data.pop('id', None)
+                if round_id:
+                    InterviewPlanRound.objects.update_or_create(
+                        id=round_id,
+                        plan=instance,
+                        defaults=round_data,
+                    )
+                else:
+                    InterviewPlanRound.objects.create(plan=instance, **round_data)
+        return instance
+
+
+class ApplyInterviewPlanSerializer(serializers.Serializer):
+    plan = serializers.PrimaryKeyRelatedField(
+        queryset=InterviewPlan.objects.filter(is_active=True),
+    )
+
+
 class InterviewSerializer(serializers.ModelSerializer):
     class Meta:
         model = Interview
         fields = [
-            'id', 'hiring_application', 'round_type', 'round_number',
+            'id', 'hiring_application', 'planned_round', 'round_type', 'round_number',
             'scheduled_at', 'scheduled_by', 'interviewer',
             'status', 'mode', 'location', 'meeting_link',
             'created_at', 'updated_at',

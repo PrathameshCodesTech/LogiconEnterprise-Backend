@@ -311,13 +311,27 @@ class TestResolverLogic(AutoResolveBase):
         with self.assertRaises(BudgetReservationError):
             resolve_budget_plan_for_mrf(mrf)
 
-    def test_a12_wrong_budget_type_not_considered(self):
-        """Budget with budget_type != 'headcount' is excluded."""
-        _budget(self.org, self.site_client, 'Manpower A12', 'ar-mp-a12',
-                site=self.site, budget_type='manpower')
+    def test_a12_unsupported_budget_type_not_considered(self):
+        """Budget types outside MRF manpower/onboarding scope are excluded."""
+        _budget(self.org, self.site_client, 'Deployment A12', 'ar-dep-a12',
+                site=self.site, budget_type='deployment')
         mrf = _mrf(self.org, self.site, self.admin)
         with self.assertRaises(BudgetReservationError):
             resolve_budget_plan_for_mrf(mrf)
+
+    def test_a12b_sales_onboarding_budget_type_is_considered(self):
+        """Sales-converted onboarding budgets are valid MRF budget sources."""
+        plan = _budget(self.org, self.site_client, 'Onboarding A12B', 'ar-onb-a12b',
+                       site=self.site, budget_type='onboarding')
+        mrf = _mrf(self.org, self.site, self.admin)
+        self.assertEqual(resolve_budget_plan_for_mrf(mrf), plan)
+
+    def test_a12c_manpower_budget_type_is_considered(self):
+        """Manpower budgets are valid MRF budget sources."""
+        plan = _budget(self.org, self.site_client, 'Manpower A12C', 'ar-mp-a12c',
+                       site=self.site, budget_type='manpower')
+        mrf = _mrf(self.org, self.site, self.admin)
+        self.assertEqual(resolve_budget_plan_for_mrf(mrf), plan)
 
 
 # ─── A13–A18: reserve_budget_for_mrf auto-link ────────────────────────────────

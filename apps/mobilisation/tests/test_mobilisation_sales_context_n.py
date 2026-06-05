@@ -45,6 +45,7 @@ from apps.sales.services import (
     record_client_response,
     mark_lead_won_from_client_approval,
 )
+from apps.sales.proposal_calculation import seed_default_proposal_component_rules
 
 
 SALES_CONTEXT_URL = '/api/mobilisation/setup-requests/{id}/sales-context/'
@@ -97,6 +98,7 @@ def _all_caps():
 def _won_lead_with_proposal(org, user):
     """Create a fully won sales lead with a locked final proposal."""
     from apps.sales.models import SiteSurvey
+    seed_default_proposal_component_rules(org=org)
     lead = SalesLead.objects.create(
         org=org, client_name='Acme Ltd',
         client_contact_person='John', client_email='john@acme.com', client_phone='9999',
@@ -227,8 +229,8 @@ class SalesContextEndpointTestCase(TestCase):
         self.assertGreater(len(data['proposal_versions']), 0)
         self.assertEqual(data['proposal_versions'][0]['version_number'], 1)
 
-    def test_readiness_counts_departments_and_users(self):
-        """5. Readiness counts departments/users correctly."""
+    def test_readiness_counts_client_users(self):
+        """5. Readiness counts client user setup correctly."""
         lead, proposal = _won_lead_with_proposal(self.org, self.user)
         mob_request = convert_won_sales_lead_to_onboarding_setup(lead, self.user)
 
@@ -245,8 +247,11 @@ class SalesContextEndpointTestCase(TestCase):
         self.assertIn('created_users', readiness)
         self.assertIn('ready_to_finalize', readiness)
 
-        # Initially, no departments/users are created
+        # Initially, no client users are created. Departments are no longer
+        # required for client-side mobilisation setup.
+        self.assertEqual(readiness['expected_departments'], 0)
         self.assertEqual(readiness['created_departments'], 0)
+        self.assertEqual(readiness['missing_departments'], 0)
         self.assertEqual(readiness['created_users'], 0)
         self.assertFalse(readiness['ready_to_finalize'])
 

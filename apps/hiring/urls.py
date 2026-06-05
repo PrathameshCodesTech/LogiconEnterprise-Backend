@@ -5,6 +5,7 @@ from .views import (
     PipelineStageViewSet,
     HiringDemandViewSet,
     CandidateMatchResultViewSet,
+    InterviewPlanViewSet,
     InterviewViewSet,
     InterviewFeedbackViewSet,
     OfferViewSet,
@@ -16,6 +17,7 @@ router.register('applications', HiringApplicationViewSet, basename='hiring-appli
 router.register('pipeline-stages', PipelineStageViewSet, basename='pipeline-stage')
 router.register('demands', HiringDemandViewSet, basename='hiring-demand')
 router.register('match-results', CandidateMatchResultViewSet, basename='candidate-match-result')
+router.register('interview-plans', InterviewPlanViewSet, basename='interview-plan')
 router.register('interviews', InterviewViewSet, basename='interview')
 router.register('interview-feedbacks', InterviewFeedbackViewSet, basename='interview-feedback')
 router.register('offers', OfferViewSet, basename='offer')

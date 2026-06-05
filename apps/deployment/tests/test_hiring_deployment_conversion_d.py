@@ -26,7 +26,7 @@ from apps.core.models import Organization, ScopeNode
 from apps.deployment.models import Employee, SiteDeployment
 from apps.deployment.services import convert_hiring_application_to_deployment
 from apps.hiring.models import (
-    ApplicationStageHistory, HiringApplication, PipelineStage,
+    ApplicationStageHistory, HiringApplication, Offer, PipelineStage,
 )
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
@@ -136,10 +136,19 @@ class ConversionBase(TestCase):
         return _candidate(self.org, f'99000{phone_suffix}', first='John', last=f'User{phone_suffix}')
 
     def _make_application(self, candidate, app_status='selected'):
-        return _application(
+        app = _application(
             self.org, candidate, self.mrf, self.mrf_li,
             self.site, self.job_role, self.stage, app_status,
         )
+        if app_status in ('selected', 'offer_accepted'):
+            Offer.objects.create(
+                hiring_application=app,
+                offered_ctc='300000.00',
+                status='accepted',
+            )
+            app.status = 'offer_accepted'
+            app.save(update_fields=['status'])
+        return app
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -148,8 +157,8 @@ class ConversionBase(TestCase):
 
 class TestConversionStatusGuard(ConversionBase):
 
-    def test_01_selected_application_converts_successfully(self):
-        """Application with status='selected' can be converted."""
+    def test_01_accepted_offer_application_converts_successfully(self):
+        """Application with an accepted offer can be converted."""
         cand = self._make_candidate('0101')
         app = self._make_application(cand, 'selected')
         result = convert_hiring_application_to_deployment(app, self.superuser)
@@ -178,6 +187,18 @@ class TestConversionStatusGuard(ConversionBase):
         app = self._make_application(cand, 'rejected')
         with self.assertRaises(ValidationError):
             convert_hiring_application_to_deployment(app, self.superuser)
+
+    def test_04b_selected_without_offer_blocked(self):
+        """A selected application cannot deploy until an offer is accepted."""
+        from rest_framework.exceptions import ValidationError
+        cand = self._make_candidate('0402')
+        app = _application(
+            self.org, cand, self.mrf, self.mrf_li,
+            self.site, self.job_role, self.stage, 'selected',
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            convert_hiring_application_to_deployment(app, self.superuser)
+        self.assertIn('Accepted offer', str(ctx.exception))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -216,9 +237,14 @@ class TestConversionCreation(ConversionBase):
         """HiringApplication status is updated to 'deployed' after conversion."""
         cand = self._make_candidate('0701')
         app = self._make_application(cand)
+        PipelineStage.objects.create(
+            org=self.org, name='Deployed', code='deployed',
+            order=70, stage_type='onboarding', is_terminal=True,
+        )
         convert_hiring_application_to_deployment(app, self.superuser)
         app.refresh_from_db()
         self.assertEqual(app.status, 'deployed')
+        self.assertEqual(app.current_stage.code, 'deployed')
 
     def test_08_application_stage_history_created(self):
         """ApplicationStageHistory row is created for the status transition."""

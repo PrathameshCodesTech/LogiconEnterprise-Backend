@@ -120,12 +120,15 @@ class SiteRoleRequirementSerializer(serializers.ModelSerializer):
     wage_category_name = serializers.CharField(source='wage_category.name', read_only=True, default=None)
     wage_category_code = serializers.CharField(source='wage_category.code', read_only=True, default=None)
     location_area_name = serializers.CharField(source='site.location_area.name', read_only=True, default=None)
+    allocated_headcount = serializers.SerializerMethodField()
+    remaining_headcount = serializers.SerializerMethodField()
 
     class Meta:
         model = SiteRoleRequirement
         fields = [
             'id', 'site', 'site_name', 'department', 'department_name', 'department_code',
             'job_role', 'job_role_name', 'job_role_code', 'approved_headcount',
+            'allocated_headcount', 'remaining_headcount',
             'billing_type', 'billing_rate', 'wage_min', 'wage_max',
             'shift_hours', 'wage_category', 'wage_category_name', 'wage_category_code',
             'location_area_name',
@@ -146,6 +149,17 @@ class SiteRoleRequirementSerializer(serializers.ModelSerializer):
             'source_type', 'source_sales_lead', 'source_proposal_version',
             'created_at', 'updated_at',
         ]
+
+    def get_allocated_headcount(self, obj):
+        from apps.mrf.services import get_billable_headcount_usage
+
+        if obj.billing_type != 'billable':
+            return 0
+        return get_billable_headcount_usage(obj.site, obj.job_role)
+
+    def get_remaining_headcount(self, obj):
+        allocated = self.get_allocated_headcount(obj)
+        return max(0, obj.approved_headcount - allocated)
 
 
 class SiteRoleRequirementWriteSerializer(serializers.ModelSerializer):

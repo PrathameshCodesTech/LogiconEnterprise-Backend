@@ -18,8 +18,8 @@ from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode
 from apps.hiring.models import (
-    ApplicationStageHistory, CandidateMatchResult,
-    HiringApplication, PipelineStage,
+    ApplicationStageHistory, CandidateMatchResult, Interview, InterviewFeedback,
+    HiringApplication, InterviewPlan, InterviewPlanRound, PipelineStage,
 )
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
@@ -557,6 +557,27 @@ class TestHiringDemandAPI(HiringBBase):
         self.assertGreaterEqual(item['shortlisted_count'], 1)
         self.assertGreaterEqual(item['open_count'], 0)
 
+    def test_24b_demand_counts_deployed_as_filled(self):
+        deployed_candidate = _candidate(self.org, phone='9800000041')
+        HiringApplication.objects.create(
+            org=self.org,
+            candidate=deployed_candidate,
+            mrf=self.approved_mrf,
+            mrf_line_item=self.mrf_li,
+            site=self.site,
+            job_role=self.job_role,
+            status='deployed',
+        )
+
+        self._auth(self.hr_admin)
+        resp = self.api.get(f'/api/hiring/demands/?mrf={self.approved_mrf.pk}')
+        self.assertEqual(resp.status_code, 200)
+        item = next((r for r in resp.data['results'] if r['id'] == self.mrf_li.pk), None)
+        self.assertIsNotNone(item)
+        self.assertEqual(item['offer_accepted_count'], 1)
+        self.assertEqual(item['open_count'], self.mrf_li.headcount - 1)
+        self.assertEqual(item['selected_count'], 1)
+
     # test_25
     def test_25_demand_scope_isolation(self):
         # Create a second org with its own MRF — user from first org should not see it
@@ -654,3 +675,184 @@ class TestRegression(HiringBBase):
         resp = self.api.get('/api/hiring/interviews/')
         self.assertEqual(resp.status_code, 200)
         self.assertIn('results', resp.data)
+
+
+# â”€â”€â”€ Tests 31-33: Interview lifecycle wiring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+class TestInterviewLifecycleAPI(HiringBBase):
+
+    def _make_app(self):
+        cand = _candidate(self.org, phone='9800000060', first='Interview', last='Cand')
+        return HiringApplication.objects.create(
+            org=self.org,
+            candidate=cand,
+            mrf=self.approved_mrf,
+            mrf_line_item=self.mrf_li,
+            site=self.site,
+            job_role=self.job_role,
+            current_stage=self.stage_screening,
+            status='selected',
+        )
+
+    def test_31_create_interview_moves_application_to_interview_stage(self):
+        app = self._make_app()
+        interview_stage = _stage(self.org, 'interview', order=40, stage_type='interview')
+        self._auth(self.hr_admin)
+        resp = self.api.post(
+            '/api/hiring/interviews/',
+            {
+                'hiring_application': app.pk,
+                'round_type': 'hr',
+                'round_number': 1,
+                'interviewer': self.hr_exec.pk,
+                'mode': 'phone',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'interview_scheduled')
+        self.assertEqual(app.current_stage_id, interview_stage.pk)
+
+    def test_32_proceed_feedback_returns_application_to_client_approved(self):
+        app = self._make_app()
+        approved_stage = _stage(self.org, 'client_approved', order=30, stage_type='screening')
+        interview = Interview.objects.create(
+            hiring_application=app,
+            round_type='hr',
+            round_number=1,
+            interviewer=self.hr_exec,
+            scheduled_by=self.hr_admin,
+            status='completed',
+        )
+        app.status = 'interview_scheduled'
+        app.save(update_fields=['status'])
+
+        self._auth(self.hr_admin)
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {
+                'interview': interview.pk,
+                'rating': 4,
+                'feedback': 'Good fit',
+                'recommendation': 'proceed',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(InterviewFeedback.objects.filter(interview=interview).exists())
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'selected')
+        self.assertEqual(app.current_stage_id, approved_stage.pk)
+
+    def test_33_reject_feedback_closes_application(self):
+        app = self._make_app()
+        rejected_stage = _stage(
+            self.org, 'rejected_closed', order=80,
+            stage_type='onboarding', is_terminal=True,
+        )
+        interview = Interview.objects.create(
+            hiring_application=app,
+            round_type='technical',
+            round_number=1,
+            interviewer=self.hr_exec,
+            scheduled_by=self.hr_admin,
+            status='completed',
+        )
+
+        self._auth(self.hr_admin)
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {
+                'interview': interview.pk,
+                'rating': 2,
+                'feedback': 'Not suitable',
+                'recommendation': 'reject',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'rejected')
+        self.assertEqual(app.current_stage_id, rejected_stage.pk)
+
+    def test_34_apply_interview_plan_creates_pending_rounds(self):
+        app = self._make_app()
+        interview_stage = _stage(self.org, 'interview', order=40, stage_type='interview')
+        plan = InterviewPlan.objects.create(
+            org=self.org,
+            job_role=self.job_role,
+            name='Guard screening',
+            code='guard-screening',
+        )
+        InterviewPlanRound.objects.create(plan=plan, round_type='hr', round_number=1)
+        InterviewPlanRound.objects.create(plan=plan, round_type='technical', round_number=2)
+
+        self._auth(self.hr_admin)
+        resp = self.api.post(
+            f'/api/hiring/applications/{app.pk}/apply-interview-plan/',
+            {'plan': plan.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        app.refresh_from_db()
+        self.assertEqual(app.interview_plan_id, plan.pk)
+        self.assertEqual(app.status, 'interview_in_progress')
+        self.assertEqual(app.current_stage_id, interview_stage.pk)
+        self.assertEqual(resp.data['created_count'], 2)
+        self.assertEqual(
+            list(app.interviews.order_by('round_number').values_list('round_type', 'status')),
+            [('hr', 'pending'), ('technical', 'pending')],
+        )
+
+    def test_35_plan_requires_all_required_rounds_before_offer_ready(self):
+        app = self._make_app()
+        interview_stage = _stage(self.org, 'interview', order=40, stage_type='interview')
+        approved_stage = _stage(self.org, 'client_approved', order=30, stage_type='screening')
+        plan = InterviewPlan.objects.create(
+            org=self.org,
+            job_role=self.job_role,
+            name='Two round screening',
+            code='two-round-screening',
+        )
+        hr_round = InterviewPlanRound.objects.create(plan=plan, round_type='hr', round_number=1)
+        tech_round = InterviewPlanRound.objects.create(plan=plan, round_type='technical', round_number=2)
+        app.interview_plan = plan
+        app.status = 'interview_in_progress'
+        app.current_stage = interview_stage
+        app.save(update_fields=['interview_plan', 'status', 'current_stage'])
+        hr_interview = Interview.objects.create(
+            hiring_application=app,
+            planned_round=hr_round,
+            round_type='hr',
+            round_number=1,
+            status='completed',
+        )
+        tech_interview = Interview.objects.create(
+            hiring_application=app,
+            planned_round=tech_round,
+            round_type='technical',
+            round_number=2,
+            status='completed',
+        )
+
+        self._auth(self.hr_admin)
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {'interview': hr_interview.pk, 'rating': 4, 'recommendation': 'proceed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'interview_in_progress')
+        self.assertEqual(app.current_stage_id, interview_stage.pk)
+
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {'interview': tech_interview.pk, 'rating': 5, 'recommendation': 'proceed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'selected')
+        self.assertEqual(app.current_stage_id, approved_stage.pk)

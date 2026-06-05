@@ -193,8 +193,9 @@ def _my_work_section(user):
 
 def _client_overview_section(user):
     from apps.sites.models import Client, SiteProfile
-    from apps.core.models import Department
+    from apps.access.capabilities import is_client_facing_user
 
+    client_facing = is_client_facing_user(user)
     has_access = user_has_any_capability(user, ['client.read', 'site.read', 'department.read'])
     empty = {
         'client_count': 0, 'site_count': 0, 'department_count': 0, 'clients': [],
@@ -208,9 +209,32 @@ def _client_overview_section(user):
 
     accessible_client_ids = client_qs.values_list('id', flat=True)
     accessible_site_ids = site_qs.values_list('id', flat=True)
-    dept_count = Department.objects.filter(
-        Q(client_id__in=accessible_client_ids) | Q(site_id__in=accessible_site_ids)
-    ).distinct().count()
+    if client_facing:
+        dept_count = 0
+        departments_by_client = []
+    else:
+        from apps.core.models import Department
+
+        dept_count = Department.objects.filter(
+            Q(client_id__in=accessible_client_ids) | Q(site_id__in=accessible_site_ids)
+        ).distinct().count()
+
+        # departments_by_client: departments directly linked to accessible clients
+        dept_by_client_rows = list(
+            Department.objects
+            .filter(client_id__in=accessible_client_ids)
+            .values('client_id', 'client__name')
+            .annotate(count=Count('id'))
+            .order_by('-count')[:8]
+        )
+        departments_by_client = [
+            {
+                'key': f"client:{r['client_id']}",
+                'label': r['client__name'] or f"Client #{r['client_id']}",
+                'count': r['count'],
+            }
+            for r in dept_by_client_rows
+        ]
 
     clients_with_sites = list(
         client_qs
@@ -234,23 +258,6 @@ def _client_overview_section(user):
             'url': f"/sites?client={r['client_id']}",
         }
         for r in site_by_client_rows
-    ]
-
-    # departments_by_client: departments directly linked to accessible clients
-    dept_by_client_rows = list(
-        Department.objects
-        .filter(client_id__in=accessible_client_ids)
-        .values('client_id', 'client__name')
-        .annotate(count=Count('id'))
-        .order_by('-count')[:8]
-    )
-    departments_by_client = [
-        {
-            'key': f"client:{r['client_id']}",
-            'label': r['client__name'] or f"Client #{r['client_id']}",
-            'count': r['count'],
-        }
-        for r in dept_by_client_rows
     ]
 
     return {

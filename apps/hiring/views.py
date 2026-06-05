@@ -6,6 +6,7 @@ Phase Talent-Hiring-B: Hiring pipeline operational APIs.
 
 from decimal import Decimal, InvalidOperation
 
+from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status
@@ -19,8 +20,9 @@ from apps.access.capabilities import (
     HIRING_APP_READ, HIRING_APP_CREATE, HIRING_APP_UPDATE, HIRING_APP_MANAGE,
     PIPELINE_STAGE_READ, CANDIDATE_MATCH_READ, MRF_READ,
     DEPLOYMENT_CREATE, EMPLOYEE_CREATE, SITE_DEPLOYMENT_CREATE,
+    INTERVIEW_READ, INTERVIEW_CREATE, INTERVIEW_MANAGE,
     OFFER_READ, OFFER_CREATE, OFFER_UPDATE, OFFER_APPROVE, OFFER_MANAGE,
-    get_user_capabilities,
+    get_user_capabilities, is_client_facing_user,
 )
 from apps.access.permissions import HasCapability
 from apps.access.querysets import (
@@ -37,7 +39,7 @@ from apps.access.viewsets import (
 
 from .models import (
     HiringApplication, ApplicationStageHistory, PipelineStage,
-    CandidateMatchResult, Interview, InterviewFeedback, Offer,
+    CandidateMatchResult, Interview, InterviewFeedback, InterviewPlan, Offer,
 )
 from .serializers import (
     HiringApplicationReadSerializer,
@@ -46,6 +48,8 @@ from .serializers import (
     PipelineStageSerializer,
     HiringDemandSerializer,
     CandidateMatchResultSerializer,
+    ApplyInterviewPlanSerializer,
+    InterviewPlanSerializer,
     InterviewSerializer,
     InterviewFeedbackSerializer,
     OfferSerializer,
@@ -58,6 +62,15 @@ from .serializers import (
     BulkSendToClientReviewSerializer,
     ClientDecisionSerializer,
     ClientReviewApplicationSerializer,
+)
+from .lifecycle import (
+    STAGE_CLIENT_APPROVED,
+    STAGE_CLIENT_REVIEW,
+    STAGE_INTERVIEW,
+    STAGE_REJECTED_CLOSED,
+    STAGE_SHORTLISTED,
+    default_initial_stage,
+    transition_application,
 )
 
 
@@ -94,21 +107,93 @@ def _apply_send_to_client_review(application, actor, note=''):
     old_status = application.status
     new_status = 'client_review' if old_status in ('shortlisted', 'draft') else old_status
 
-    application.client_visible = True
-    application.client_decision = 'pending'
-    application.status = new_status
-    application.save(update_fields=['client_visible', 'client_decision', 'status'])
-
-    ApplicationStageHistory.objects.create(
-        hiring_application=application,
-        from_stage=application.current_stage,
-        to_stage=application.current_stage,
-        from_status=old_status,
-        to_status=new_status,
-        moved_by=actor,
+    transition_application(
+        application,
+        actor=actor,
+        status=new_status,
+        stage_code=STAGE_CLIENT_REVIEW,
         comment=note or 'Sent to client review.',
+        extra_attrs={
+            'client_visible': True,
+            'client_decision': 'pending',
+        },
     )
     return 'sent'
+
+
+def _required_plan_round_ids(application):
+    plan = application.interview_plan
+    if plan is None:
+        return set()
+    return set(
+        plan.rounds
+        .filter(is_required=True, is_active=True)
+        .values_list('id', flat=True)
+    )
+
+
+def _passed_required_plan_round_ids(application):
+    return set(
+        Interview.objects
+        .filter(
+            hiring_application=application,
+            planned_round__isnull=False,
+            status='completed',
+            feedbacks__recommendation='proceed',
+        )
+        .values_list('planned_round_id', flat=True)
+        .distinct()
+    )
+
+
+def _all_required_plan_rounds_passed(application):
+    required_ids = _required_plan_round_ids(application)
+    if not required_ids:
+        return True
+    return required_ids.issubset(_passed_required_plan_round_ids(application))
+
+
+def _next_interview_bucket(application, interviews, feedbacks):
+    if application.status in {'rejected', 'cancelled', 'offer_declined'}:
+        return 'on_hold'
+    if application.status in {'offer_released', 'offer_accepted', 'deployed'}:
+        return 'closed'
+
+    latest_feedback = sorted(
+        feedbacks,
+        key=lambda f: f.created_at,
+        reverse=True,
+    )
+    if latest_feedback and latest_feedback[0].recommendation == 'hold':
+        return 'on_hold'
+
+    feedback_interview_ids = {f.interview_id for f in feedbacks}
+
+    active = [
+        i for i in sorted(interviews, key=lambda iv: (iv.round_number, iv.id))
+        if i.status in {'pending', 'scheduled', 'rescheduled', 'no_show'}
+    ]
+    if active:
+        return active[0].round_type
+
+    completed_without_feedback = [
+        i for i in interviews
+        if i.status == 'completed' and i.id not in feedback_interview_ids
+    ]
+    if completed_without_feedback:
+        return 'feedback_pending'
+
+    if application.interview_plan_id:
+        if _all_required_plan_rounds_passed(application):
+            return 'cleared_for_offer'
+        return 'ready_for_screening'
+
+    if latest_feedback and latest_feedback[0].recommendation == 'proceed':
+        return 'cleared_for_offer'
+
+    if application.client_decision == 'approved' or application.status == 'selected':
+        return 'ready_for_screening'
+    return 'closed'
 
 
 # ─── PipelineStageViewSet ─────────────────────────────────────────────────────
@@ -154,10 +239,20 @@ class HiringApplicationViewSet(
         'convert_to_deployment': HIRING_APP_READ,
         'send_to_client_review': HIRING_APP_UPDATE,
         'client_decision': HIRING_APP_UPDATE,
+        'apply_interview_plan': INTERVIEW_MANAGE,
+        'interview_pipeline': INTERVIEW_READ,
     }
 
     filterset_fields = ['org', 'site', 'job_role', 'status', 'client_visible', 'client_decision']
     search_fields = ['candidate__first_name', 'candidate__last_name', 'candidate__phone']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if is_client_facing_user(self.request.user):
+            if self.action == 'client_decision':
+                return qs.filter(client_visible=True)
+            return qs.none()
+        return qs
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -188,11 +283,7 @@ class HiringApplicationViewSet(
 
         current_stage = serializer.validated_data.get('current_stage')
         if current_stage is None:
-            current_stage = (
-                PipelineStage.objects.filter(org=mrf.org, is_active=True)
-                .order_by('order')
-                .first()
-            )
+            current_stage = default_initial_stage(mrf.org)
 
         instance = serializer.save(
             org=mrf.org,
@@ -277,6 +368,140 @@ class HiringApplicationViewSet(
             ).data
         )
 
+    @action(detail=True, methods=['post'], url_path='apply-interview-plan')
+    def apply_interview_plan(self, request, pk=None):
+        """
+        Select an interview plan and materialize its active rounds as pending interviews.
+        Body: { plan }
+        """
+        application = self.get_object()
+        serializer = ApplyInterviewPlanSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        plan = serializer.validated_data['plan']
+
+        if plan.org_id != application.org_id:
+            raise ValidationError({'plan': 'Interview plan does not belong to this application organization.'})
+        if plan.job_role_id and plan.job_role_id != application.job_role_id:
+            raise ValidationError({'plan': 'Interview plan is configured for a different job role.'})
+        if application.status in {'rejected', 'cancelled', 'deployed', 'offer_released', 'offer_accepted', 'offer_declined'}:
+            raise ValidationError({
+                'non_field_errors': f"Cannot apply an interview plan to application in status '{application.status}'."
+            })
+
+        created_count = 0
+        attached_count = 0
+        with transaction.atomic():
+            application.interview_plan = plan
+            application.save(update_fields=['interview_plan', 'updated_at'])
+
+            for round_obj in plan.rounds.filter(is_active=True).order_by('round_number', 'id'):
+                interview = (
+                    Interview.objects
+                    .filter(hiring_application=application, planned_round=round_obj)
+                    .first()
+                )
+                if interview is None:
+                    interview = (
+                        Interview.objects
+                        .filter(
+                            hiring_application=application,
+                            planned_round__isnull=True,
+                            round_type=round_obj.round_type,
+                            round_number=round_obj.round_number,
+                        )
+                        .first()
+                    )
+                if interview is not None:
+                    if interview.planned_round_id != round_obj.id:
+                        interview.planned_round = round_obj
+                        interview.save(update_fields=['planned_round', 'updated_at'])
+                        attached_count += 1
+                    continue
+
+                Interview.objects.create(
+                    hiring_application=application,
+                    planned_round=round_obj,
+                    round_type=round_obj.round_type,
+                    round_number=round_obj.round_number,
+                    mode=round_obj.mode,
+                    status='pending',
+                    scheduled_by=request.user,
+                )
+                created_count += 1
+
+            transition_application(
+                application,
+                actor=request.user,
+                status='interview_in_progress',
+                stage_code=STAGE_INTERVIEW,
+                comment=f"Interview plan applied: {plan.name}.",
+            )
+
+        application.refresh_from_db()
+        interviews = Interview.objects.filter(hiring_application=application).order_by('round_number', 'id')
+        return Response({
+            'application': HiringApplicationReadSerializer(
+                application, context=self.get_serializer_context()
+            ).data,
+            'plan': InterviewPlanSerializer(plan).data,
+            'interviews': InterviewSerializer(interviews, many=True).data,
+            'created_count': created_count,
+            'attached_count': attached_count,
+        })
+
+    @action(detail=False, methods=['get'], url_path='interview-pipeline')
+    def interview_pipeline(self, request):
+        """
+        Interview-focused pipeline summary grouped by actual interview state.
+        """
+        qs = self.filter_queryset(self.get_queryset()).filter(
+            status__in=[
+                'selected',
+                'interview_scheduled',
+                'interview_in_progress',
+                'rejected',
+                'cancelled',
+                'offer_declined',
+            ],
+        ).prefetch_related('interviews__feedbacks')
+
+        bucket_order = [
+            'ready_for_screening',
+            'hr',
+            'technical',
+            'manager',
+            'client',
+            'final',
+            'feedback_pending',
+            'on_hold',
+            'cleared_for_offer',
+        ]
+        buckets = {
+            key: {'key': key, 'count': 0, 'applications': []}
+            for key in bucket_order
+        }
+
+        for application in qs:
+            interviews = list(application.interviews.all())
+            feedbacks = [f for interview in interviews for f in interview.feedbacks.all()]
+            bucket = _next_interview_bucket(application, interviews, feedbacks)
+            if bucket == 'closed':
+                continue
+            if bucket not in buckets:
+                bucket = 'ready_for_screening'
+            buckets[bucket]['count'] += 1
+            buckets[bucket]['applications'].append({
+                'application': HiringApplicationReadSerializer(
+                    application, context=self.get_serializer_context()
+                ).data,
+                'interviews': InterviewSerializer(interviews, many=True).data,
+                'feedbacks': InterviewFeedbackSerializer(feedbacks, many=True).data,
+                'required_round_ids': sorted(_required_plan_round_ids(application)),
+                'passed_round_ids': sorted(_passed_required_plan_round_ids(application)),
+            })
+
+        return Response({'buckets': [buckets[key] for key in bucket_order]})
+
     @action(detail=True, methods=['post'], url_path='send-to-client-review')
     def send_to_client_review(self, request, pk=None):
         """
@@ -336,35 +561,27 @@ class HiringApplicationViewSet(
                     'hiring_application.manage is required to override an existing client decision.'
                 )
 
-        old_status = application.status
-        old_stage = application.current_stage
-
-        application.client_decision = decision
-        application.client_decision_by = request.user
-        application.client_decision_at = timezone.now()
-        application.client_decision_note = note
-        update_fields = [
-            'client_decision', 'client_decision_by',
-            'client_decision_at', 'client_decision_note',
-        ]
-
+        new_status = None
+        stage_code = None
         if decision == 'approved' and application.status == 'client_review':
-            application.status = 'selected'
-            update_fields.append('status')
+            new_status = 'selected'
+            stage_code = STAGE_CLIENT_APPROVED
         elif decision == 'rejected':
-            application.status = 'rejected'
-            update_fields.append('status')
+            new_status = 'rejected'
+            stage_code = STAGE_REJECTED_CLOSED
 
-        application.save(update_fields=update_fields)
-
-        ApplicationStageHistory.objects.create(
-            hiring_application=application,
-            from_stage=old_stage,
-            to_stage=application.current_stage,
-            from_status=old_status,
-            to_status=application.status,
-            moved_by=request.user,
+        transition_application(
+            application,
+            actor=request.user,
+            status=new_status,
+            stage_code=stage_code,
             comment=note or f'Client decision: {decision}.',
+            extra_attrs={
+                'client_decision': decision,
+                'client_decision_by': request.user,
+                'client_decision_at': timezone.now(),
+                'client_decision_note': note,
+            },
         )
 
         return Response(
@@ -450,16 +667,25 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
             ),
             selected_count=Count(
                 'hiring_applications',
-                filter=Q(hiring_applications__status='selected'),
+                filter=Q(hiring_applications__status__in=[
+                    'selected',
+                    'interview_scheduled',
+                    'interview_in_progress',
+                    'offer_released',
+                    'offer_accepted',
+                    'deployed',
+                ]),
             ),
             offer_accepted_count=Count(
                 'hiring_applications',
-                filter=Q(hiring_applications__status='offer_accepted'),
+                filter=Q(hiring_applications__status__in=['offer_accepted', 'deployed']),
             ),
         )
         user = self.request.user
         if user.is_superuser:
             return qs
+        if is_client_facing_user(user):
+            return qs.none()
         return filter_mrf_line_items_for_user(qs, user)
 
     @action(detail=True, methods=['get'], url_path='candidate-pool')
@@ -638,11 +864,7 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
                 {'non_field_errors': 'This candidate is already linked to this hiring demand.'}
             )
 
-        first_stage = (
-            PipelineStage.objects.filter(org=mrf.org, is_active=True)
-            .order_by('order')
-            .first()
-        )
+        first_stage = default_initial_stage(mrf.org)
 
         match_score = None
         if match_result:
@@ -701,16 +923,59 @@ class CandidateMatchResultViewSet(ScopedReadOnlyModelViewSet):
 
 # ─── Interview / InterviewFeedback / Offer ────────────────────────────────────
 
-class InterviewViewSet(ScopedReadOnlyModelViewSet):
+class InterviewPlanViewSet(ActionCapabilityMixin, ModelViewSet):
+    queryset = InterviewPlan.objects.select_related('org', 'job_role').prefetch_related('rounds')
+    serializer_class = InterviewPlanSerializer
+    permission_classes = [IsAuthenticated, HasCapability]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    filterset_fields = ['job_role', 'is_default', 'is_active']
+    search_fields = ['name', 'code']
+
+    action_required_capabilities = {
+        'list': INTERVIEW_READ,
+        'retrieve': INTERVIEW_READ,
+        'create': INTERVIEW_MANAGE,
+        'partial_update': INTERVIEW_MANAGE,
+    }
+
+    def get_queryset(self):
+        qs = self.queryset
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        org_id = getattr(user, 'org_id', None)
+        if org_id is None:
+            return qs.none()
+        return qs.filter(org_id=org_id)
+
+    def perform_create(self, serializer):
+        org = serializer.validated_data.get('org')
+        if not self.request.user.is_superuser:
+            user_org_id = getattr(self.request.user, 'org_id', None)
+            if org is not None and org.pk != user_org_id:
+                raise PermissionDenied('Cross-org interview plan creation is not allowed.')
+            serializer.save(org_id=user_org_id)
+            return
+        serializer.save()
+
+
+class InterviewViewSet(ActionCapabilityMixin, ModelViewSet):
     queryset = Interview.objects.select_related(
         'hiring_application',
         'hiring_application__site__scope_node',
         'hiring_application__site__client__scope_node',
+        'planned_round',
         'interviewer', 'scheduled_by',
     ).order_by('-scheduled_at')
     serializer_class = InterviewSerializer
     permission_classes = [IsAuthenticated, HasCapability]
-    required_capability = 'interview.read'
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    action_required_capabilities = {
+        'list': INTERVIEW_READ,
+        'retrieve': INTERVIEW_READ,
+        'create': INTERVIEW_CREATE,
+        'partial_update': INTERVIEW_MANAGE,
+    }
 
     def get_queryset(self):
         qs = self.queryset
@@ -726,8 +991,46 @@ class InterviewViewSet(ScopedReadOnlyModelViewSet):
 
     filterset_fields = ['hiring_application', 'round_type', 'status', 'mode']
 
+    def perform_create(self, serializer):
+        application = serializer.validated_data['hiring_application']
+        if not self.request.user.is_superuser and application.org_id != getattr(self.request.user, 'org_id', None):
+            raise PermissionDenied('Cross-org interview scheduling is not allowed.')
+        if application.status in {'rejected', 'cancelled', 'deployed', 'offer_released', 'offer_accepted', 'offer_declined'}:
+            raise ValidationError({
+                'non_field_errors': f"Cannot schedule interview for application in status '{application.status}'."
+            })
+        planned_round = serializer.validated_data.get('planned_round')
+        if planned_round is not None:
+            if planned_round.plan.org_id != application.org_id:
+                raise ValidationError({'planned_round': 'Planned round does not belong to this application organization.'})
+            if application.interview_plan_id and planned_round.plan_id != application.interview_plan_id:
+                raise ValidationError({'planned_round': 'Planned round is not part of the selected interview plan.'})
+            application.interview_plan = planned_round.plan
+            application.save(update_fields=['interview_plan', 'updated_at'])
+        scheduled_by = serializer.validated_data.get('scheduled_by') or self.request.user
+        serializer.save(scheduled_by=scheduled_by)
+        transition_application(
+            application,
+            actor=self.request.user,
+            status='interview_scheduled',
+            stage_code=STAGE_INTERVIEW,
+            comment=f"Interview round scheduled: {serializer.instance.round_type}.",
+        )
 
-class InterviewFeedbackViewSet(ScopedReadOnlyModelViewSet):
+    def perform_update(self, serializer):
+        interview = serializer.save()
+        application = interview.hiring_application
+        if interview.status in {'pending', 'scheduled', 'rescheduled'}:
+            transition_application(
+                application,
+                actor=self.request.user,
+                status='interview_scheduled' if interview.status in {'scheduled', 'rescheduled'} else 'interview_in_progress',
+                stage_code=STAGE_INTERVIEW,
+                comment=f"Interview round {interview.status}: {interview.round_type}.",
+            )
+
+
+class InterviewFeedbackViewSet(ActionCapabilityMixin, ModelViewSet):
     queryset = InterviewFeedback.objects.select_related(
         'interview', 'interview__hiring_application__site__scope_node',
         'interview__hiring_application__site__client__scope_node',
@@ -735,7 +1038,13 @@ class InterviewFeedbackViewSet(ScopedReadOnlyModelViewSet):
     )
     serializer_class = InterviewFeedbackSerializer
     permission_classes = [IsAuthenticated, HasCapability]
-    required_capability = 'interview.read'
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    action_required_capabilities = {
+        'list': INTERVIEW_READ,
+        'retrieve': INTERVIEW_READ,
+        'create': INTERVIEW_CREATE,
+        'partial_update': INTERVIEW_MANAGE,
+    }
 
     def get_queryset(self):
         qs = self.queryset
@@ -750,6 +1059,53 @@ class InterviewFeedbackViewSet(ScopedReadOnlyModelViewSet):
         return qs.filter(site_q | client_q).distinct()
 
     filterset_fields = ['interview', 'recommendation', 'given_by']
+
+    def perform_create(self, serializer):
+        interview = serializer.validated_data['interview']
+        application = interview.hiring_application
+        if not self.request.user.is_superuser and application.org_id != getattr(self.request.user, 'org_id', None):
+            raise PermissionDenied('Cross-org interview feedback is not allowed.')
+        given_by = serializer.validated_data.get('given_by') or self.request.user
+        serializer.save(given_by=given_by)
+
+        if interview.status != 'completed':
+            interview.status = 'completed'
+            interview.save(update_fields=['status', 'updated_at'])
+
+        recommendation = serializer.instance.recommendation
+        if recommendation == 'reject':
+            transition_application(
+                application,
+                actor=self.request.user,
+                status='rejected',
+                stage_code=STAGE_REJECTED_CLOSED,
+                comment='Interview feedback recommendation: reject.',
+            )
+        elif recommendation == 'proceed':
+            if _all_required_plan_rounds_passed(application):
+                transition_application(
+                    application,
+                    actor=self.request.user,
+                    status='selected',
+                    stage_code=STAGE_CLIENT_APPROVED,
+                    comment='All required interview rounds passed.',
+                )
+            else:
+                transition_application(
+                    application,
+                    actor=self.request.user,
+                    status='interview_in_progress',
+                    stage_code=STAGE_INTERVIEW,
+                    comment='Interview feedback recommendation: proceed. More rounds remain.',
+                )
+        elif recommendation == 'hold':
+            transition_application(
+                application,
+                actor=self.request.user,
+                status='interview_in_progress',
+                stage_code=STAGE_INTERVIEW,
+                comment='Interview feedback recommendation: hold.',
+            )
 
 
 class OfferViewSet(ActionCapabilityMixin, ModelViewSet):

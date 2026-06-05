@@ -105,7 +105,7 @@ def resolve_budget_plan_for_mrf(mrf):
       3. Client-level: same client, site IS NULL, department IS NULL
 
     All candidates must have budget_nature='billable', status='active',
-    is_active=True, budget_type='headcount'.
+    is_active=True, and a manpower-bearing budget_type.
 
     Raises BudgetReservationError when:
       - mrf is not billable
@@ -134,7 +134,7 @@ def resolve_budget_plan_for_mrf(mrf):
         status='active',
         is_active=True,
         client=client,
-        budget_type='headcount',
+        budget_type__in=['onboarding', 'manpower', 'headcount'],
     )
 
     # Priority 1: department-exact match
