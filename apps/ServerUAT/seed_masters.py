@@ -59,6 +59,33 @@ MINIMUM_WAGE_RATES = {
     },
 }
 
+ROLE_SPECIFIC_WAGE_RATES = {
+    'pune_metro': {
+        'electrician': ('skilled', '19000.00', '730.77'),
+        'plumber': ('skilled', '18500.00', '711.54'),
+        'mst': ('skilled', '21000.00', '807.69'),
+        'hvac': ('skilled', '22000.00', '846.15'),
+        'carpenter': ('skilled', '18000.00', '692.31'),
+        'painter': ('skilled', '17500.00', '673.08'),
+        'mason': ('skilled', '18000.00', '692.31'),
+        'helper': ('unskilled', '15000.00', '576.92'),
+        'htp_operator': ('skilled', '20500.00', '788.46'),
+        'wtp_operator': ('skilled', '20500.00', '788.46'),
+    },
+    'mumbai_metro': {
+        'electrician': ('skilled', '20000.00', '769.23'),
+        'plumber': ('skilled', '19500.00', '750.00'),
+        'mst': ('skilled', '22500.00', '865.38'),
+        'hvac': ('skilled', '23500.00', '903.85'),
+        'carpenter': ('skilled', '19000.00', '730.77'),
+        'painter': ('skilled', '18500.00', '711.54'),
+        'mason': ('skilled', '19000.00', '730.77'),
+        'helper': ('unskilled', '16000.00', '615.38'),
+        'htp_operator': ('skilled', '21500.00', '826.92'),
+        'wtp_operator': ('skilled', '21500.00', '826.92'),
+    },
+}
+
 WAGE_EFFECTIVE_FROM = datetime.date(2026, 1, 1)
 SOURCE_NOTE = 'server_uat_seed'
 
@@ -73,7 +100,7 @@ class Command(BaseCommand):
         job_roles = self._seed_job_roles(org)
         wage_categories = self._seed_wage_categories()
         locations = self._seed_location_areas()
-        self._seed_minimum_wage_rates(org, locations, wage_categories)
+        self._seed_minimum_wage_rates(org, locations, wage_categories, job_roles)
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -197,46 +224,96 @@ class Command(BaseCommand):
             node = node.parent
         return ''
 
-    def _seed_minimum_wage_rates(self, org, locations, wage_categories):
+    def _seed_minimum_wage_rates(self, org, locations, wage_categories, job_roles):
         from apps.wages.models import MinimumWageRate
 
+        category_rows = 0
         for location_code, category_rates in MINIMUM_WAGE_RATES.items():
             location = locations[location_code]
             for category_code, amounts in category_rates.items():
                 category = wage_categories[category_code]
                 monthly_wage, daily_wage = amounts
-                rate, created = MinimumWageRate.objects.get_or_create(
+                created = self._upsert_wage_rate(
+                    MinimumWageRate,
                     org=org,
                     location=location,
                     wage_category=category,
                     role=None,
-                    effective_from=WAGE_EFFECTIVE_FROM,
-                    defaults={
-                        'state': location.state_name,
-                        'city': location.name,
-                        'monthly_wage': Decimal(monthly_wage),
-                        'daily_wage': Decimal(daily_wage),
-                        'effective_to': None,
-                        'source_note': SOURCE_NOTE,
-                        'is_active': True,
-                    },
+                    monthly_wage=monthly_wage,
+                    daily_wage=daily_wage,
                 )
-                changed_fields = []
-                for field, value in {
-                    'state': location.state_name,
-                    'city': location.name,
-                    'monthly_wage': Decimal(monthly_wage),
-                    'daily_wage': Decimal(daily_wage),
-                    'effective_to': None,
-                    'source_note': SOURCE_NOTE,
-                    'is_active': True,
-                }.items():
-                    if getattr(rate, field) != value:
-                        setattr(rate, field, value)
-                        changed_fields.append(field)
-                if changed_fields:
-                    rate.save(update_fields=changed_fields)
+                category_rows += 1
                 self.stdout.write(
                     f'  [MinimumWageRate] {location_code} / {category_code} = {monthly_wage} monthly - '
                     f'{"CREATED" if created else "EXISTS"}'
                 )
+
+        role_rows = 0
+        for location_code, role_rates in ROLE_SPECIFIC_WAGE_RATES.items():
+            location = locations[location_code]
+            for role_code, values in role_rates.items():
+                category_code, monthly_wage, daily_wage = values
+                role = job_roles[role_code]
+                category = wage_categories[category_code]
+                created = self._upsert_wage_rate(
+                    MinimumWageRate,
+                    org=org,
+                    location=location,
+                    wage_category=category,
+                    role=role,
+                    monthly_wage=monthly_wage,
+                    daily_wage=daily_wage,
+                )
+                role_rows += 1
+                self.stdout.write(
+                    f'  [MinimumWageRate] {location_code} / {role_code} / {category_code} = '
+                    f'{monthly_wage} monthly - {"CREATED" if created else "EXISTS"}'
+                )
+
+        self.stdout.write(
+            f'  [MinimumWageRate] category fallback rows: {category_rows}, role-specific rows: {role_rows}'
+        )
+
+    def _upsert_wage_rate(
+        self,
+        model,
+        *,
+        org,
+        location,
+        wage_category,
+        role,
+        monthly_wage,
+        daily_wage,
+    ):
+        rate, created = model.objects.get_or_create(
+            org=org,
+            location=location,
+            wage_category=wage_category,
+            role=role,
+            effective_from=WAGE_EFFECTIVE_FROM,
+            defaults={
+                'state': location.state_name,
+                'city': location.name,
+                'monthly_wage': Decimal(monthly_wage),
+                'daily_wage': Decimal(daily_wage),
+                'effective_to': None,
+                'source_note': SOURCE_NOTE,
+                'is_active': True,
+            },
+        )
+        changed_fields = []
+        for field, value in {
+            'state': location.state_name,
+            'city': location.name,
+            'monthly_wage': Decimal(monthly_wage),
+            'daily_wage': Decimal(daily_wage),
+            'effective_to': None,
+            'source_note': SOURCE_NOTE,
+            'is_active': True,
+        }.items():
+            if getattr(rate, field) != value:
+                setattr(rate, field, value)
+                changed_fields.append(field)
+        if changed_fields:
+            rate.save(update_fields=changed_fields)
+        return created
