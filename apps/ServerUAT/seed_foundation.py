@@ -25,6 +25,8 @@ ACCESS_ROLES = [
     ('operations_manager', 'Operations Manager', 'department'),
     ('finance_manager', 'Finance Manager', 'department'),
     ('hr_admin', 'HR Admin', 'department'),
+    ('client_admin', 'Client Admin', 'client'),
+    ('client_site_user', 'Client Site User', 'site'),
 ]
 
 USERS = [

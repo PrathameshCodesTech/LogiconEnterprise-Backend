@@ -774,7 +774,10 @@ def convert_won_sales_lead_to_onboarding_setup(lead, user, proposal=None, operat
     Raises ValueError if conversion guardrails are not met.
     """
     from apps.mobilisation.models import MobilisationSetupRequest
-    from apps.mobilisation.services import assign_operations_owner
+    from apps.mobilisation.services import (
+        assign_operations_owner,
+        ensure_primary_contact_proposed_user,
+    )
 
     existing = MobilisationSetupRequest.objects.filter(source_sales_lead=lead).first()
     if existing:
@@ -838,6 +841,7 @@ def convert_won_sales_lead_to_onboarding_setup(lead, user, proposal=None, operat
             source_proposal_version=proposal,
             status='draft',
         )
+        ensure_primary_contact_proposed_user(onboarding_request)
         if operations_owner is not None:
             assign_operations_owner(onboarding_request, operations_owner, actor=user)
 

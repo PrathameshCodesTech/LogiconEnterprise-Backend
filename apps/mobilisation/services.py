@@ -500,6 +500,87 @@ def _client_admin_role(request):
     ).first()
 
 
+def ensure_primary_contact_proposed_user(request):
+    """
+    Ensure the converted lead/client contact appears as the default proposed
+    client portal user. Returns the proposed user, or None when required contact
+    data or the client_admin role is missing.
+    """
+    if request.client_id is None:
+        return None
+
+    from .models import MobilisationProposedUser
+    from apps.accounts.models import User
+
+    lead = request.source_sales_lead
+    full_name = ''
+    email = ''
+    phone = ''
+    if lead is not None:
+        full_name = lead.client_contact_person or request.client.contact_name or request.client.name
+        email = lead.client_email or request.client.contact_email
+        phone = lead.client_phone or request.client.contact_phone
+    else:
+        full_name = request.client.contact_name or request.client.name
+        email = request.client.contact_email
+        phone = request.client.contact_phone
+
+    email = (email or '').strip().lower()
+    if not email:
+        return None
+
+    access_role = _client_admin_role(request)
+    if access_role is None:
+        return None
+
+    existing_user = User.objects.filter(org=request.org, email__iexact=email).first()
+    if existing_user is not None:
+        return None
+
+    has_primary = request.proposed_users.filter(
+        is_active=True,
+        is_primary_contact=True,
+    ).exists()
+    proposed_user, created = MobilisationProposedUser.objects.get_or_create(
+        request=request,
+        email=email,
+        defaults={
+            'full_name': full_name or 'Client Primary Contact',
+            'phone': phone or '',
+            'user_type': 'client',
+            'access_role': access_role,
+            'scope_level': 'client',
+            'real_site': None,
+            'is_primary_contact': not has_primary,
+            'send_invite_on_finalization': True,
+            'is_active': True,
+        },
+    )
+    changed_fields = []
+    updates = {
+        'full_name': full_name or proposed_user.full_name or 'Client Primary Contact',
+        'phone': phone or proposed_user.phone or '',
+        'access_role': access_role,
+        'scope_level': 'client',
+        'real_site': None,
+        'is_active': True,
+    }
+    if created:
+        return proposed_user
+    for field, value in updates.items():
+        current = getattr(proposed_user, f'{field}_id') if hasattr(value, 'pk') else getattr(proposed_user, field)
+        expected = value.pk if hasattr(value, 'pk') else value
+        if current != expected:
+            setattr(proposed_user, field, value)
+            changed_fields.append(field)
+    if not has_primary and not proposed_user.is_primary_contact:
+        proposed_user.is_primary_contact = True
+        changed_fields.append('is_primary_contact')
+    if changed_fields:
+        proposed_user.save(update_fields=changed_fields + ['updated_at'])
+    return proposed_user
+
+
 def _user_suggestion(request, *, key, full_name, email, phone, access_role, scope_level='client', real_site=None):
     from apps.accounts.models import User
 
