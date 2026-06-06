@@ -2,9 +2,12 @@
 ServerUAT master/config seed for operational lookup data.
 
 This seed contains only masters needed before user-driven UAT flows:
-job roles, wage geography, wage categories, and minimum wage rates.
+job roles, wage locations, wage categories, and role-specific wage rates.
 It does not create clients, sites, SRRs, sales records, MRFs, hiring records,
 or deployments.
+
+ServerUAT intentionally keeps wage geography flat. Users only need to select the
+actual wage location used for rates, not parent state/city hierarchy rows.
 """
 
 import datetime
@@ -34,30 +37,12 @@ WAGE_CATEGORIES = [
     ('supervisor', 'Supervisor', 'Supervisor wage category'),
 ]
 
-LOCATION_TREE = [
-    ('maharashtra', 'Maharashtra', 'state', None),
-    ('pune', 'Pune', 'city', 'maharashtra'),
-    ('pune_metro', 'Pune Metro', 'zone', 'pune'),
-    ('mumbai', 'Mumbai', 'city', 'maharashtra'),
-    ('mumbai_metro', 'Mumbai Metro', 'zone', 'mumbai'),
+LOCATION_AREAS = [
+    ('pune_metro', 'Pune Metro', 'zone', 'Maharashtra'),
+    ('mumbai_metro', 'Mumbai Metro', 'zone', 'Maharashtra'),
 ]
 
-MINIMUM_WAGE_RATES = {
-    'pune_metro': {
-        'unskilled': ('15000.00', '576.92'),
-        'semi_skilled': ('17000.00', '653.85'),
-        'skilled': ('19000.00', '730.77'),
-        'highly_skilled': ('21000.00', '807.69'),
-        'supervisor': ('22000.00', '846.15'),
-    },
-    'mumbai_metro': {
-        'unskilled': ('16000.00', '615.38'),
-        'semi_skilled': ('18000.00', '692.31'),
-        'skilled': ('20000.00', '769.23'),
-        'highly_skilled': ('23000.00', '884.62'),
-        'supervisor': ('24000.00', '923.08'),
-    },
-}
+LEGACY_LOCATION_CODES_TO_DEACTIVATE = ['maharashtra', 'pune', 'mumbai']
 
 ROLE_SPECIFIC_WAGE_RATES = {
     'pune_metro': {
@@ -100,6 +85,8 @@ class Command(BaseCommand):
         job_roles = self._seed_job_roles(org)
         wage_categories = self._seed_wage_categories()
         locations = self._seed_location_areas()
+        self._deactivate_legacy_location_areas()
+        self._deactivate_seed_fallback_wage_rates(org)
         self._seed_minimum_wage_rates(org, locations, wage_categories, job_roles)
 
         self.stdout.write(
@@ -183,11 +170,9 @@ class Command(BaseCommand):
         from apps.wages.models import LocationArea
 
         locations = {}
-        for code, name, area_type, parent_code in LOCATION_TREE:
-            parent = locations.get(parent_code) if parent_code else None
-            state_name = name if area_type == 'state' else self._state_name_for(parent)
+        for code, name, area_type, state_name in LOCATION_AREAS:
             location, created = LocationArea.objects.get_or_create(
-                parent=parent,
+                parent=None,
                 code=code,
                 defaults={
                     'name': name,
@@ -200,6 +185,7 @@ class Command(BaseCommand):
             for field, value in {
                 'name': name,
                 'area_type': area_type,
+                'parent': None,
                 'state_name': state_name,
                 'is_active': True,
             }.items():
@@ -209,44 +195,34 @@ class Command(BaseCommand):
             if changed_fields:
                 location.save(update_fields=changed_fields)
             locations[code] = location
-            parent_label = parent.code if parent else 'root'
             self.stdout.write(
-                f'  [LocationArea] {code} / {name} ({area_type}, parent={parent_label}) - '
+                f'  [LocationArea] {code} / {name} ({area_type}, parent=root) - '
                 f'{"CREATED" if created else "EXISTS"}'
             )
         return locations
 
-    def _state_name_for(self, location):
-        node = location
-        while node is not None:
-            if node.area_type == 'state':
-                return node.name
-            node = node.parent
-        return ''
+    def _deactivate_legacy_location_areas(self):
+        from apps.wages.models import LocationArea
+
+        updated = LocationArea.objects.filter(
+            code__in=LEGACY_LOCATION_CODES_TO_DEACTIVATE,
+            is_active=True,
+        ).update(is_active=False)
+        self.stdout.write(f'  [LocationArea] deactivated legacy hierarchy rows: {updated}')
+
+    def _deactivate_seed_fallback_wage_rates(self, org):
+        from apps.wages.models import MinimumWageRate
+
+        updated = MinimumWageRate.objects.filter(
+            org=org,
+            role__isnull=True,
+            source_note=SOURCE_NOTE,
+            is_active=True,
+        ).update(is_active=False)
+        self.stdout.write(f'  [MinimumWageRate] deactivated seed fallback rows: {updated}')
 
     def _seed_minimum_wage_rates(self, org, locations, wage_categories, job_roles):
         from apps.wages.models import MinimumWageRate
-
-        category_rows = 0
-        for location_code, category_rates in MINIMUM_WAGE_RATES.items():
-            location = locations[location_code]
-            for category_code, amounts in category_rates.items():
-                category = wage_categories[category_code]
-                monthly_wage, daily_wage = amounts
-                created = self._upsert_wage_rate(
-                    MinimumWageRate,
-                    org=org,
-                    location=location,
-                    wage_category=category,
-                    role=None,
-                    monthly_wage=monthly_wage,
-                    daily_wage=daily_wage,
-                )
-                category_rows += 1
-                self.stdout.write(
-                    f'  [MinimumWageRate] {location_code} / {category_code} = {monthly_wage} monthly - '
-                    f'{"CREATED" if created else "EXISTS"}'
-                )
 
         role_rows = 0
         for location_code, role_rates in ROLE_SPECIFIC_WAGE_RATES.items():
@@ -271,7 +247,7 @@ class Command(BaseCommand):
                 )
 
         self.stdout.write(
-            f'  [MinimumWageRate] category fallback rows: {category_rows}, role-specific rows: {role_rows}'
+            f'  [MinimumWageRate] active role-specific rows: {role_rows}'
         )
 
     def _upsert_wage_rate(
