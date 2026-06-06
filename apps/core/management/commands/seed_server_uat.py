@@ -23,14 +23,20 @@ class Command(BaseCommand):
             'seed',
             nargs='?',
             default='foundation',
-            choices=['foundation'],
-            help='ServerUAT seed to run. Currently available: foundation.',
+            choices=['foundation', 'masters', 'config'],
+            help='ServerUAT seed to run. Currently available: foundation, masters, config.',
         )
 
     def handle(self, *args, **options):
         seed_name = options['seed']
         if seed_name == 'foundation':
             self._run_seed_file('seed_foundation.py')
+            return
+        if seed_name == 'masters':
+            self._run_seed_file('seed_masters.py')
+            return
+        if seed_name == 'config':
+            self._run_seed_file('seed_config.py')
             return
         raise CommandError(f'Unknown ServerUAT seed: {seed_name}')
 
