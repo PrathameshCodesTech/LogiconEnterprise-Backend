@@ -2,21 +2,15 @@
 ServerUAT foundation seed.
 
 This command intentionally seeds only the foundation needed to verify server
-login, scope, roles, permissions, and internal users. It does not seed demo
-clients, sites, budgets, wages, MRFs, hiring, or deployment data.
+login, company scope, roles, permissions, departments, and internal users. It
+does not seed demo clients, sites, budgets, wages, MRFs, hiring, or deployment
+data.
 """
 
 from django.core.management.base import BaseCommand
 
 
 PASSWORD = 'Password@123'
-
-SCOPE_DEPARTMENTS = [
-    ('sales', 'Sales'),
-    ('operations', 'Operations'),
-    ('finance', 'Finance'),
-    ('human-resources', 'Human Resources'),
-]
 
 DEPARTMENTS = [
     ('sales', 'Sales', 'Sales and client acquisition'),
@@ -48,7 +42,7 @@ USERS = [
         'first_name': 'Sales',
         'last_name': 'Manager',
         'role_code': 'sales_manager',
-        'scope_key': 'dept_sales',
+        'scope_key': 'company',
     },
     {
         'username': 'sales.user',
@@ -56,7 +50,7 @@ USERS = [
         'first_name': 'Sales',
         'last_name': 'User',
         'role_code': 'sales_manager',
-        'scope_key': 'dept_sales',
+        'scope_key': 'company',
     },
     {
         'username': 'ops.manager',
@@ -64,7 +58,7 @@ USERS = [
         'first_name': 'Operations',
         'last_name': 'Manager',
         'role_code': 'operations_manager',
-        'scope_key': 'dept_operations',
+        'scope_key': 'company',
     },
     {
         'username': 'ops.user',
@@ -72,7 +66,7 @@ USERS = [
         'first_name': 'Operations',
         'last_name': 'User',
         'role_code': 'operations_manager',
-        'scope_key': 'dept_operations',
+        'scope_key': 'company',
     },
     {
         'username': 'finance.manager',
@@ -80,7 +74,7 @@ USERS = [
         'first_name': 'Finance',
         'last_name': 'Manager',
         'role_code': 'finance_manager',
-        'scope_key': 'dept_finance',
+        'scope_key': 'company',
     },
     {
         'username': 'finance.user',
@@ -88,7 +82,7 @@ USERS = [
         'first_name': 'Finance',
         'last_name': 'User',
         'role_code': 'finance_manager',
-        'scope_key': 'dept_finance',
+        'scope_key': 'company',
     },
     {
         'username': 'hr.admin',
@@ -96,7 +90,7 @@ USERS = [
         'first_name': 'HR',
         'last_name': 'Admin',
         'role_code': 'hr_admin',
-        'scope_key': 'dept_human-resources',
+        'scope_key': 'company',
     },
     {
         'username': 'hr.user',
@@ -104,13 +98,13 @@ USERS = [
         'first_name': 'HR',
         'last_name': 'User',
         'role_code': 'hr_admin',
-        'scope_key': 'dept_human-resources',
+        'scope_key': 'company',
     },
 ]
 
 
 class Command(BaseCommand):
-    help = 'Seed ServerUAT foundation data only: org, scopes, departments, roles, permissions, users.'
+    help = 'Seed ServerUAT foundation data only: org, company scope, departments, roles, permissions, users.'
 
     def handle(self, *args, **options):
         self.stdout.write(self.style.MIGRATE_HEADING('\n=== ServerUAT Foundation Seed ===\n'))
@@ -169,31 +163,6 @@ class Command(BaseCommand):
         self.stdout.write(
             f'  [ScopeNode] logicon (company) - {"CREATED" if created else "EXISTS"}'
         )
-
-        for code, name in SCOPE_DEPARTMENTS:
-            node, created = ScopeNode.objects.get_or_create(
-                org=org,
-                parent=company,
-                code=code,
-                defaults={
-                    'name': name,
-                    'node_type': 'department',
-                    'depth': 1,
-                    'path': f'logicon/{code}',
-                    'is_active': True,
-                },
-            )
-            self._sync_scope_node(
-                node,
-                name=name,
-                node_type='department',
-                depth=1,
-                path=f'logicon/{code}',
-            )
-            nodes[f'dept_{code}'] = node
-            self.stdout.write(
-                f'  [ScopeNode] logicon/{code} (department) - {"CREATED" if created else "EXISTS"}'
-            )
 
         return nodes
 
