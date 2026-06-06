@@ -43,6 +43,7 @@ LOCATION_AREAS = [
 ]
 
 LEGACY_LOCATION_CODES_TO_DEACTIVATE = ['maharashtra', 'pune', 'mumbai']
+LEGACY_PARENTED_METRO_CODES_TO_DEACTIVATE = ['pune_metro', 'mumbai_metro']
 
 ROLE_SPECIFIC_WAGE_RATES = {
     'pune_metro': {
@@ -202,13 +203,26 @@ class Command(BaseCommand):
         return locations
 
     def _deactivate_legacy_location_areas(self):
-        from apps.wages.models import LocationArea
+        from django.db.models import Q
 
-        updated = LocationArea.objects.filter(
-            code__in=LEGACY_LOCATION_CODES_TO_DEACTIVATE,
+        from apps.wages.models import LocationArea
+        from apps.wages.models import MinimumWageRate
+
+        legacy_locations = LocationArea.objects.filter(is_active=True).filter(
+            Q(code__in=LEGACY_LOCATION_CODES_TO_DEACTIVATE)
+            | Q(code__in=LEGACY_PARENTED_METRO_CODES_TO_DEACTIVATE, parent__isnull=False)
+        )
+        legacy_location_ids = list(legacy_locations.values_list('id', flat=True))
+        wage_rows = MinimumWageRate.objects.filter(
+            location_id__in=legacy_location_ids,
+            source_note=SOURCE_NOTE,
             is_active=True,
         ).update(is_active=False)
-        self.stdout.write(f'  [LocationArea] deactivated legacy hierarchy rows: {updated}')
+        location_rows = legacy_locations.update(is_active=False)
+        self.stdout.write(
+            f'  [LocationArea] deactivated legacy hierarchy rows: {location_rows}; '
+            f'deactivated linked seed wage rows: {wage_rows}'
+        )
 
     def _deactivate_seed_fallback_wage_rates(self, org):
         from apps.wages.models import MinimumWageRate
