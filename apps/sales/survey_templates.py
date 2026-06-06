@@ -55,18 +55,16 @@ SCOPE_FIELDS = {
 # Section 6: shift / deployment table rows.
 # (description, line_type)  — descriptions are unique per survey.
 SHIFT_DEPLOYMENT_ROWS = [
-    ('Site Management team', 'item'),
-    ('Technical(8 Hrs x 6 days)', 'item'),
-    ('Tech Supervisor', 'item'),
     ('Electrician', 'item'),
     ('Plumber', 'item'),
-    ('STP', 'item'),
-    ('HK Supervisor', 'item'),
-    ('Janitor', 'item'),
-    ('Machinery', 'item'),
-    ('HK Consumables', 'item'),
-    ('Sub Total', 'subtotal'),
-    ('TOTAL', 'total'),
+    ('MST', 'item'),
+    ('HVAC', 'item'),
+    ('Carpenter', 'item'),
+    ('Painter', 'item'),
+    ('Mason', 'item'),
+    ('Helper', 'item'),
+    ('HTP Operator', 'item'),
+    ('WTP Operator', 'item'),
 ]
 
 # Section 7: locations table rows.
