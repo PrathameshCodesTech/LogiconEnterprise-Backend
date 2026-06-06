@@ -23,8 +23,8 @@ class Command(BaseCommand):
             'seed',
             nargs='?',
             default='foundation',
-            choices=['foundation', 'masters', 'config'],
-            help='ServerUAT seed to run. Currently available: foundation, masters, config.',
+            choices=['foundation', 'masters', 'config', 'workflows'],
+            help='ServerUAT seed to run. Currently available: foundation, masters, config, workflows.',
         )
 
     def handle(self, *args, **options):
@@ -37,6 +37,9 @@ class Command(BaseCommand):
             return
         if seed_name == 'config':
             self._run_seed_file('seed_config.py')
+            return
+        if seed_name == 'workflows':
+            self._run_seed_file('seed_workflows.py')
             return
         raise CommandError(f'Unknown ServerUAT seed: {seed_name}')
 
