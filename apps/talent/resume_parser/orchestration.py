@@ -27,7 +27,7 @@ def _run(resume) -> None:
     from apps.talent.models import Resume
     from .exceptions import ManualReviewRequired
     from .extraction import extract_text
-    from .llm_parser import parse_resume_text
+    from .deterministic_parser import parse_resume_text
     from .normalization import normalize_parsed_json
     from .persistence import persist_parsed_data
     from .validation import validate_parsed_json
@@ -91,7 +91,7 @@ def _run(resume) -> None:
 
     Resume.objects.filter(pk=resume.pk).update(
         status='indexed',
-        parser_engine='openai_gpt4o_mini',
+        parser_engine='deterministic_v1',
         parser_confidence=conf_dec,
     )
     resume.status = 'indexed'

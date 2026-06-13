@@ -146,8 +146,25 @@ class OfferBase(TestCase):
 
     def _make_app(self, suffix, app_status='selected', **kwargs):
         cand = self._make_cand(suffix)
+        kwargs.setdefault('client_visible', True)
+        kwargs.setdefault('client_decision', 'approved')
         return _application(
             self.org, cand, self.mrf, self.mrf_li,
+            self.site, self.job_role, self.stage,
+            app_status=app_status, **kwargs,
+        )
+
+    def _make_non_billable_app(self, suffix, app_status='selected', **kwargs):
+        cand = self._make_cand(suffix)
+        mrf = ManpowerRequest.objects.create(
+            org=self.org, site=self.site, mrf_type='new_hiring',
+            billing_type='non_billable', status='approved', requested_by=self.hr_admin,
+        )
+        mrf_li = MRFLineItem.objects.create(
+            mrf=mrf, job_role=self.job_role, headcount=1,
+        )
+        return _application(
+            self.org, cand, mrf, mrf_li,
             self.site, self.job_role, self.stage,
             app_status=app_status, **kwargs,
         )
@@ -206,6 +223,31 @@ class TestOfferCreation(OfferBase):
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIn('approval', str(resp.data).lower())
 
+    def test_03b_billable_offer_requires_client_approval_even_if_not_visible(self):
+        """Billable client-site hiring cannot bypass client approval by leaving client_visible false."""
+        app = self._make_app(
+            '0104', 'selected', client_visible=False, client_decision=None,
+        )
+        self._auth(self.hr_admin)
+        resp = self.api.post(self._offers_url(), {
+            'hiring_application': app.pk,
+            'offered_ctc': '550000.00',
+        }, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('approval', str(resp.data).lower())
+
+    def test_03c_non_billable_offer_does_not_require_client_approval(self):
+        """Internal non-billable hiring can create an offer without client review."""
+        app = self._make_non_billable_app('0105', 'selected')
+        self._auth(self.hr_admin)
+        resp = self.api.post(self._offers_url(), {
+            'hiring_application': app.pk,
+            'offered_ctc': '550000.00',
+            'joining_date': _future_date(30),
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['status'], 'draft')
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Group 2 — Release (4-5)
@@ -233,6 +275,24 @@ class TestOfferRelease(OfferBase):
         self.assertEqual(app.status, 'offer_released')
         self.assertEqual(app.current_stage.code, 'offer')
         self.assertIsNotNone(offer.released_at)
+
+    def test_04b_non_billable_offer_release_does_not_require_client_approval(self):
+        """Internal non-billable hiring can release an offer without client approval."""
+        app = self._make_non_billable_app('0402', 'selected')
+        PipelineStage.objects.create(
+            org=self.org, name='Offer', code='offer',
+            order=50, stage_type='offer',
+        )
+        offer = self._make_offer(app, status='draft')
+        self._auth(self.hr_admin)
+
+        resp = self.api.post(self._offer_action_url(offer.pk, 'release'), {}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        offer.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(offer.status, 'released')
+        self.assertEqual(app.status, 'offer_released')
 
     def test_05_release_creates_application_stage_history(self):
         """Releasing an offer creates an ApplicationStageHistory record."""

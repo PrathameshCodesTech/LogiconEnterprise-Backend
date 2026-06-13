@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from apps.access.permissions import HasCapability
+from apps.access.capabilities import is_sales_persona_user
 from apps.access.querysets import (
     filter_clients_for_user,
     filter_sites_for_user,
@@ -84,14 +85,20 @@ class ClientViewSet(ScopedModelViewSet):
         if ScopeNode.objects.filter(org=org, parent=company_node, code=node_code).exists():
             raise ValidationError({'code': 'This code conflicts with an existing scope under the company.'})
 
+        extra_fields = {
+            k: v for k, v in serializer.validated_data.items()
+            if k not in ('org', 'name', 'code')
+        }
+        if is_sales_persona_user(actor) and not extra_fields.get('owner_sales_user'):
+            extra_fields['owner_sales_user'] = actor
+
         client = create_client_with_scope(
             org=org,
             name=serializer.validated_data['name'],
             code=serializer.validated_data['code'],
             created_by=actor,
             parent_scope_node=company_node,
-            **{k: v for k, v in serializer.validated_data.items()
-               if k not in ('org', 'name', 'code')},
+            **extra_fields,
         )
         log_audit(actor, 'client.create', client, request=request)
         out = ClientSerializer(client, context={'request': request})

@@ -53,7 +53,11 @@ from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.budgets.exceptions import BudgetReservationError
 from apps.budgets.models import BudgetPlan, BudgetReservation
-from apps.budgets.services import reserve_budget_for_mrf, resolve_budget_plan_for_mrf
+from apps.budgets.services import (
+    reserve_budget_for_mrf,
+    resolve_budget_plan_for_mrf,
+    resolve_non_billable_budget_plan_for_mrf,
+)
 from apps.core.models import Department, Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
@@ -94,10 +98,11 @@ def _assign(user, role, scope_node):
 
 
 def _budget(org, client, name, code, site=None, department=None,
-            amount='900000.00', budget_type='headcount', status='active', is_active=True):
+            amount='900000.00', budget_type='headcount', status='active',
+            is_active=True, nature='billable'):
     return BudgetPlan.objects.create(
         org=org, name=name, code=code,
-        budget_nature='billable',
+        budget_nature=nature,
         budget_type=budget_type,
         client=client, site=site, department=department,
         period_start=datetime.date(2026, 1, 1),
@@ -109,11 +114,12 @@ def _budget(org, client, name, code, site=None, department=None,
 
 
 def _mrf(org, site, actor, billing_type='billable', required_department=None,
-         budget_plan=None, status='submitted'):
+         requesting_department=None, budget_plan=None, status='submitted'):
     return ManpowerRequest.objects.create(
         org=org, site=site, requested_by=actor,
         mrf_type='new_hiring', status=status,
         billing_type=billing_type,
+        requesting_department=requesting_department,
         required_department=required_department,
         budget_plan=budget_plan,
     )
@@ -378,11 +384,47 @@ class TestReserveBudgetAutoLink(AutoResolveBase):
         reservation = reserve_budget_for_mrf(mrf, actor=self.admin)
         self.assertEqual(reservation.budget_plan_id, explicit_bp.pk)
 
-    def test_a16_non_billable_no_budget_plan_returns_none(self):
-        """Non-billable MRF with no budget_plan returns None (no reservation)."""
-        mrf = _mrf(self.org, self.site, self.admin, billing_type='non_billable')
-        result = reserve_budget_for_mrf(mrf, actor=self.admin)
-        self.assertIsNone(result)
+    def test_a16_non_billable_mrf_auto_resolves_department_budget(self):
+        """Non-billable MRF with required_department auto-resolves department budget."""
+        bp = _budget(
+            self.org, self.site_client, 'Internal Dept A16', 'ar-in-a16',
+            department=self.dept_a, amount='100000.00', nature='non_billable',
+            budget_type='hiring',
+        )
+        mrf = _mrf(
+            self.org, self.site, self.admin, billing_type='non_billable',
+            requesting_department=self.dept_b, required_department=self.dept_a,
+        )
+        _li(mrf, self.job_role, headcount=2, billing_rate_snapshot=Decimal('10000'))
+
+        self.assertEqual(resolve_non_billable_budget_plan_for_mrf(mrf), bp)
+        reservation = reserve_budget_for_mrf(mrf, actor=self.admin)
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation.status, 'reserved')
+        self.assertEqual(reservation.budget_plan_id, bp.pk)
+        self.assertEqual(reservation.amount, Decimal('20000.00'))
+
+    def test_a16b_non_billable_mrf_ignores_non_hiring_department_budget(self):
+        """Internal MRFs must not consume general/operations department budgets."""
+        _budget(
+            self.org, self.site_client, 'General Dept A16B', 'ar-in-a16b-gen',
+            department=self.dept_a, amount='100000.00', nature='non_billable',
+            budget_type='general',
+        )
+        _budget(
+            self.org, self.site_client, 'Ops Dept A16B', 'ar-in-a16b-ops',
+            department=self.dept_a, amount='100000.00', nature='non_billable',
+            budget_type='operations',
+        )
+        mrf = _mrf(
+            self.org, self.site, self.admin, billing_type='non_billable',
+            requesting_department=self.dept_b, required_department=self.dept_a,
+        )
+        _li(mrf, self.job_role, headcount=1, billing_rate_snapshot=Decimal('10000'))
+
+        with self.assertRaises(BudgetReservationError) as ctx:
+            resolve_non_billable_budget_plan_for_mrf(mrf)
+        self.assertIn('No active internal hiring budget', str(ctx.exception))
 
     def test_a17_auto_resolve_fail_propagates_as_budget_reservation_error(self):
         """No matching plan → BudgetReservationError → workflow start returns 400."""
@@ -459,15 +501,23 @@ class TestMRFSerializerResolvedBudget(AutoResolveBase):
         self.assertEqual(resp.data['resolved_budget_scope'], 'explicit')
         self.assertEqual(resp.data['resolved_budget_plan_id'], bp.pk)
 
-    def test_a22_non_billable_mrf_resolved_scope_none(self):
-        """Non-billable MRF with no budget_plan returns resolved_budget_scope='none'."""
-        mrf = _mrf(self.org, self.site, self.admin, billing_type='non_billable')
-        _li(mrf, self.job_role, headcount=1)
+    def test_a22_non_billable_mrf_resolves_department_budget_context(self):
+        """Non-billable MRF detail includes auto-resolved department budget context."""
+        bp = _budget(
+            self.org, self.site_client, 'Internal Detail A22', 'ar-in-a22',
+            department=self.dept_a, amount='100000.00', nature='non_billable',
+            budget_type='hiring',
+        )
+        mrf = _mrf(
+            self.org, self.site, self.admin, billing_type='non_billable',
+            requesting_department=self.dept_b, required_department=self.dept_a,
+        )
+        _li(mrf, self.job_role, headcount=1, billing_rate_snapshot=Decimal('1000'))
 
         resp = self._api(self.admin).get(f'/api/mrf/requests/{mrf.pk}/')
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data['resolved_budget_scope'], 'none')
-        self.assertIsNone(resp.data['resolved_budget_plan_id'])
+        self.assertEqual(resp.data['resolved_budget_scope'], 'department')
+        self.assertEqual(resp.data['resolved_budget_plan_id'], bp.pk)
 
 
 # ─── A23: Workflow task drawer budget context ─────────────────────────────────

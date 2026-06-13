@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from apps.access.permissions import HasCapability
 from apps.access.scope import actor_can_access_scope
 from apps.access.viewsets import ActionCapabilityMixin, ReadAfterWriteMixin, ScopedModelViewSet
+from apps.access.models import AccessRole
 
 from .models import (
     MobilisationSetupRequest,
@@ -80,6 +81,7 @@ class MobilisationSetupRequestViewSet(ScopedModelViewSet):
         'readiness':         'mobilisation.read',
         'sales_context':     'mobilisation.read',
         'setup_suggestions': 'mobilisation.read',
+        'eligible_client_roles': 'mobilisation.read',
         'setup_builder': 'mobilisation.read',
         'apply_setup_builder_template': 'mobilisation.update',
         'apply_setup_suggestions': 'mobilisation.update',
@@ -127,6 +129,38 @@ class MobilisationSetupRequestViewSet(ScopedModelViewSet):
         obj = self.get_object()
         context_data = get_mobilisation_sales_context(obj)
         return Response(context_data)
+
+    @action(detail=True, methods=['get'], url_path='eligible-client-roles')
+    def eligible_client_roles(self, request, pk=None):
+        """
+        GET /api/mobilisation/setup-requests/{id}/eligible-client-roles/
+
+        Returns only client-facing roles that can be assigned to proposed
+        mobilisation users. Use ?scope_level=client or ?scope_level=site.
+        """
+        from .role_validation import is_eligible_client_user_role
+
+        obj = self.get_object()
+        scope_level = request.query_params.get('scope_level') or 'client'
+        if scope_level not in ('client', 'site'):
+            raise ValidationError({'scope_level': 'Must be "client" or "site".'})
+
+        roles = [
+            role
+            for role in AccessRole.objects.filter(org=obj.org, is_active=True).order_by('name')
+            if is_eligible_client_user_role(role, scope_level)
+        ]
+        return Response([
+            {
+                'id': role.pk,
+                'org': role.org_id,
+                'name': role.name,
+                'code': role.code,
+                'node_type_scope': role.node_type_scope,
+                'is_active': role.is_active,
+            }
+            for role in roles
+        ])
 
     @action(detail=True, methods=['get'], url_path='setup-suggestions')
     def setup_suggestions(self, request, pk=None):

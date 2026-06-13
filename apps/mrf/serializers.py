@@ -314,15 +314,14 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
             )
             if budget_plan is not None and mrf is not None:
                 billing_type = mrf.billing_type
-                dept_ids = [
-                    d for d in [mrf.requesting_department_id, mrf.required_department_id] if d
-                ]
+                dept_ids = [mrf.required_department_id] if mrf.required_department_id else []
                 li_errors = validate_budget_plan_for_context(
                     budget_plan,
                     org=mrf.org,
                     billing_type=billing_type,
                     site=mrf.site if billing_type == 'billable' else None,
                     department_ids=dept_ids if billing_type == 'non_billable' else None,
+                    require_budget_type='hiring' if billing_type == 'non_billable' else None,
                 )
                 if li_errors:
                     raise serializers.ValidationError(li_errors)
@@ -753,6 +752,21 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
         if not billing_type:
             errors['billing_type'] = 'billing_type is required.'
 
+        if not client_requested and billing_type == 'non_billable':
+            if requesting_department is None and request is not None:
+                user_department = getattr(request.user, 'department', None)
+                if user_department is not None:
+                    data['requesting_department'] = user_department
+                    requesting_department = user_department
+            if requesting_department is None:
+                errors['requesting_department'] = (
+                    'requesting_department is required for non-billable MRFs.'
+                )
+            if required_department is None:
+                errors['required_department'] = (
+                    'required_department is required for non-billable MRFs.'
+                )
+
         # ── request_number uniqueness (belt-and-suspenders over DB constraint) ─
         request_number = data.get(
             'request_number',
@@ -794,15 +808,14 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             if budget_plan is not None and site is not None:
                 billing_type = data.get('billing_type') or (instance.billing_type if instance else None)
                 if billing_type:
-                    dept_ids = [
-                        d.pk for d in [requesting_department, required_department] if d
-                    ]
+                    dept_ids = [required_department.pk] if required_department else []
                     errors.update(validate_budget_plan_for_context(
                         budget_plan,
                         org=site.org,
                         billing_type=billing_type,
                         site=site if billing_type == 'billable' else None,
                         department_ids=dept_ids if billing_type == 'non_billable' else None,
+                        require_budget_type='hiring' if billing_type == 'non_billable' else None,
                     ))
 
         if errors:

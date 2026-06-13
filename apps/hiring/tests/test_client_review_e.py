@@ -230,6 +230,27 @@ class TestSendToClientReview(ClientReviewBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['result'], 'skipped')
 
+    def test_04b_non_billable_application_cannot_be_sent_to_client_review(self):
+        """Internal non-billable hiring does not use client review."""
+        mrf = ManpowerRequest.objects.create(
+            org=self.org, site=self.site, mrf_type='new_hiring',
+            billing_type='non_billable', status='approved', requested_by=self.hr_admin,
+        )
+        mrf_li = MRFLineItem.objects.create(
+            mrf=mrf, job_role=self.job_role, headcount=1,
+        )
+        cand = self._make_cand('0402')
+        app = _application(
+            self.org, cand, mrf, mrf_li,
+            self.site, self.job_role, self.stage,
+            app_status='shortlisted',
+        )
+
+        self._auth(self.hr_admin)
+        resp = self.api.post(self._send_url(app.pk), {}, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('non-billable', str(resp.data).lower())
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Group 2 — Bulk send (5-6)

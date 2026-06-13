@@ -17,6 +17,7 @@ def validate_budget_plan_for_context(
     site=None,
     department_ids=None,
     require_nature=None,
+    require_budget_type=None,
 ):
     """
     Returns a dict {'budget_plan': message} when the budget is invalid for the context.
@@ -30,6 +31,7 @@ def validate_budget_plan_for_context(
         site:            SiteProfile instance for MRF billable boundary check.
         department_ids:  Iterable of Department PKs acceptable for non-billable match.
         require_nature:  Explicit nature override; takes precedence over billing_type.
+        require_budget_type: Optional exact budget_type required by the context.
     """
 
     def err(msg):
@@ -49,6 +51,11 @@ def validate_budget_plan_for_context(
         label = 'billable' if nature == 'billable' else 'non-billable'
         return err(f"This context requires a {label} budget.")
 
+    if require_budget_type and budget.budget_type != require_budget_type:
+        return err(
+            f"This context requires a {require_budget_type.replace('_', ' ')} budget."
+        )
+
     if budget.budget_nature == 'billable':
         if site is not None:
             # MRF site-based boundary
@@ -63,10 +70,14 @@ def validate_budget_plan_for_context(
             if budget.client_id is not None and budget.client_id != client.pk:
                 return err('Budget client does not match the request client.')
 
-    if budget.budget_nature == 'non_billable' and department_ids:
+    if budget.budget_nature == 'non_billable' and department_ids is not None:
         dept_ids = list(department_ids)
-        if budget.department_id and budget.department_id not in dept_ids:
-            return err('Budget department does not match any relevant department on this MRF.')
+        if not dept_ids:
+            return err('Non-billable MRFs require a required department for budget validation.')
+        if not budget.department_id:
+            return err('Non-billable budget must be scoped to a department.')
+        if budget.department_id not in dept_ids:
+            return err('Budget department does not match the required department on this MRF.')
 
     return {}
 
@@ -170,6 +181,45 @@ def resolve_budget_plan_for_mrf(mrf):
     )
 
 
+def resolve_non_billable_budget_plan_for_mrf(mrf):
+    """
+    Auto-select the active department budget for an internal non-billable MRF.
+
+    Non-billable demand is owned by the required department. The requesting
+    department explains who raised the request, but it must not make another
+    department budget appear valid.
+    """
+    from .models import BudgetPlan
+    from .exceptions import BudgetReservationError
+
+    if mrf.billing_type != 'non_billable':
+        raise BudgetReservationError(
+            'resolve_non_billable_budget_plan_for_mrf is only applicable to non-billable MRFs.'
+        )
+    if not mrf.required_department_id:
+        raise BudgetReservationError(
+            'Non-billable MRF requires a required department before resolving budget.'
+        )
+
+    plans = list(BudgetPlan.objects.filter(
+        org=mrf.org,
+        budget_nature='non_billable',
+        budget_type='hiring',
+        status='active',
+        is_active=True,
+        department_id=mrf.required_department_id,
+    ))
+    if len(plans) == 1:
+        return plans[0]
+    if len(plans) > 1:
+        raise BudgetReservationError(
+            'Multiple active internal hiring budgets found for this required department.'
+        )
+    raise BudgetReservationError(
+        'No active internal hiring budget found for this required department.'
+    )
+
+
 def _budget_plan_scope(plan):
     """Return 'department', 'site', or 'client' based on plan FK fields."""
     if plan.department_id is not None:
@@ -261,10 +311,9 @@ def reserve_budget_for_mrf(mrf, actor):
     """
     Create a budget reservation for an MRF when its workflow starts.
 
-    For billable MRFs with no explicit budget_plan, auto-resolves the plan via
-    resolve_budget_plan_for_mrf and saves it onto mrf.budget_plan before reserving.
-
-    No-op (returns None) if the MRF is non-billable and has no budget_plan.
+    For MRFs with no explicit budget_plan, auto-resolves the plan from the
+    relevant billable or non-billable budget context and saves it before
+    reserving.
     Idempotent: returns the existing reserved reservation if one already exists.
     Raises BudgetReservationError if resolution, validation, or calculation fails.
     """
@@ -280,21 +329,24 @@ def reserve_budget_for_mrf(mrf, actor):
             budget_plan = resolve_budget_plan_for_mrf(mrf)
             mrf.budget_plan = budget_plan
             mrf.save(update_fields=['budget_plan', 'updated_at'])
+        elif mrf.billing_type == 'non_billable':
+            budget_plan = resolve_non_billable_budget_plan_for_mrf(mrf)
+            mrf.budget_plan = budget_plan
+            mrf.save(update_fields=['budget_plan', 'updated_at'])
         else:
             return None
     else:
         budget_plan = mrf.budget_plan
 
     # Validate budget plan is still appropriate for this MRF
-    dept_ids = [
-        d for d in [mrf.requesting_department_id, mrf.required_department_id] if d
-    ]
+    dept_ids = [mrf.required_department_id] if mrf.required_department_id else []
     errors = validate_budget_plan_for_context(
         budget_plan,
         org=mrf.org,
         billing_type=mrf.billing_type,
         site=mrf.site if mrf.billing_type == 'billable' else None,
         department_ids=dept_ids if mrf.billing_type == 'non_billable' else None,
+        require_budget_type='hiring' if mrf.billing_type == 'non_billable' else None,
     )
     if errors:
         raise BudgetReservationError(

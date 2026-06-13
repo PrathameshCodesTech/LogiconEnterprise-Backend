@@ -612,6 +612,53 @@ class TestGenerateRoleRequirementsFromSurvey(TestCase):
         already = [s for s in second['skipped'] if s['reason'] == 'already_exists']
         self.assertEqual(len(already), created_first)
 
+    def test_regenerate_updates_existing_requirement_when_headcount_changes(self):
+        generate_role_requirements_from_survey(self.survey, self.user)
+        row = SiteSurveyShiftDeployment.objects.get(
+            survey=self.survey,
+            description='Electrician',
+        )
+        row.total_count = 6
+        row.save(update_fields=['total_count', 'updated_at'])
+
+        result = generate_role_requirements_from_survey(self.survey, self.user)
+
+        self.assertEqual(len(result['created']), 0)
+        updated = [u for u in result['updated'] if u['description'] == 'Electrician']
+        self.assertEqual(len(updated), 1)
+        srr = SalesRoleRequirement.objects.get(
+            survey=self.survey,
+            job_role=self.electrician,
+        )
+        self.assertEqual(srr.manpower_count, 6)
+
+    def test_role_linked_deployment_row_generates_without_description_mapping(self):
+        hvac = JobRole.objects.create(
+            org=self.org, name='HVAC', code='hvac',
+            skill_category='skilled', is_active=True,
+        )
+        SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            job_role=hvac,
+            description='HVAC',
+            general_count=1,
+            first_shift_count=1,
+            second_shift_count=1,
+            night_shift_count=1,
+            total_count=0,
+            line_type='item',
+            sort_order=8,
+        )
+
+        result = generate_role_requirements_from_survey(self.survey, self.user)
+
+        hvac_created = [c for c in result['created'] if c['description'] == 'HVAC']
+        self.assertEqual(len(hvac_created), 1)
+        self.assertEqual(hvac_created[0]['manpower_count'], 4)
+        srr = SalesRoleRequirement.objects.get(survey=self.survey, job_role=hvac)
+        self.assertEqual(srr.wage_category_id, self.wage_category.pk)
+        self.assertEqual(srr.manpower_count, 4)
+
     def test_generated_srrs_link_to_lead_site_survey(self):
         generate_role_requirements_from_survey(self.survey, self.user)
         srr = SalesRoleRequirement.objects.get(
@@ -691,6 +738,11 @@ class TestGenerateRoleRequirementsFromSurvey(TestCase):
         site = SalesLeadSite.objects.create(
             lead=lead, site_name='Auto Site', city='Pune', state='MH',
         )
+        operations_department = Department.objects.create(
+            org=self.org, name='Operations', code='operations',
+        )
+        self.user.department = operations_department
+        self.user.save(update_fields=['department', 'updated_at'])
 
         submit_to_operations(lead, self.user, operations_owner=self.user)
         survey = SiteSurvey.objects.get(lead=lead, site=site)

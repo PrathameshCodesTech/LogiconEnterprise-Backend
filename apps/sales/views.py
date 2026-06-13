@@ -6,7 +6,7 @@ ViewSets for the sales pipeline app.
 Capability map:
   SalesLead              sales_lead.read / .create / .update / .delete
   SalesLeadSite          sales_lead.read / .update
-  SiteSurvey             sales_survey.read / .update
+  SiteSurvey             sales_survey.read / .update / .assign
   SalesRoleRequirement   sales_survey.read / .update
   ProposalVersion        sales_proposal.read / .create / .update
   ProposalBudgetLine     sales_proposal.read / .update
@@ -21,6 +21,7 @@ from rest_framework.response import Response
 
 from apps.access.permissions import HasCapability
 from apps.access.viewsets import ScopedModelViewSet
+from apps.accounts.serializers import UserListSerializer
 
 from .models import (
     SalesLead, SalesLeadSite, SiteSurvey, SalesRoleRequirement,
@@ -84,6 +85,7 @@ class SalesLeadViewSet(ScopedModelViewSet):
         'partial_update': 'sales_lead.update',
         'destroy':        'sales_lead.delete',
         'submit_to_operations': 'sales_lead.update',
+        'eligible_operations_owners': 'sales_lead.update',
         'generate_proposal':    'sales_proposal.create',
         'mark_survey_started':  'sales_survey.update',
         'mark_survey_completed': 'sales_survey.update',
@@ -119,7 +121,7 @@ class SalesLeadViewSet(ScopedModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='submit-to-operations')
     def submit_to_operations(self, request, pk=None):
-        from apps.sales.services import submit_to_operations
+        from apps.sales.services import submit_to_operations, validate_operations_survey_owner
         lead = self.get_object()
         operations_owner_id = request.data.get('operations_owner')
         operations_owner = None
@@ -132,12 +134,58 @@ class SalesLeadViewSet(ScopedModelViewSet):
                     {'detail': 'operations_owner not found in this org.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            try:
+                validate_operations_survey_owner(lead.org, operations_owner)
+            except ValueError as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         try:
             submit_to_operations(lead, request.user, operations_owner=operations_owner)
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         out = SalesLeadSerializer(lead, context={'request': request})
         return Response(out.data)
+
+    @action(detail=True, methods=['get'], url_path='eligible-operations-owners')
+    def eligible_operations_owners(self, request, pk=None):
+        lead = self.get_object()
+        from apps.accounts.models import User as UserModel
+        from apps.sales.services import get_operations_department
+
+        operations_department = get_operations_department(lead.org)
+        if operations_department is None:
+            return Response(
+                {
+                    'detail': (
+                        'Operations department is not configured for this organization. '
+                        'Create an active org-level department with code "operations".'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        users = list(
+            UserModel.objects
+            .select_related('org', 'department')
+            .filter(
+                org=lead.org,
+                user_type='internal',
+                is_active=True,
+                department=operations_department,
+            )
+            .order_by('last_name', 'first_name', 'username', 'id')
+        )
+        if not users:
+            return Response(
+                {
+                    'detail': (
+                        'No active internal users are assigned to the Operations department. '
+                        'Assign operations users to department code "operations" before submitting to operations.'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = UserListSerializer(users, many=True, context={'request': request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='generate-proposal')
     def generate_proposal(self, request, pk=None):
@@ -195,7 +243,7 @@ class SiteSurveyViewSet(ScopedModelViewSet):
         'update':               'sales_survey.update',
         'partial_update':       'sales_survey.update',
         'destroy':              'sales_survey.update',
-        'assign_owner':         'sales_survey.update',
+        'assign_owner':         'sales_survey.assign',
         'mark_started':         'sales_survey.update',
         'mark_completed':       'sales_survey.update',
         'structured':           'sales_survey.read',
@@ -220,7 +268,10 @@ class SiteSurveyViewSet(ScopedModelViewSet):
             assigned_to = UserModel.objects.get(pk=assigned_to_id, org=survey.lead.org)
         except UserModel.DoesNotExist:
             return Response({'detail': 'User not found in this org.'}, status=status.HTTP_400_BAD_REQUEST)
-        assign_survey_owner(survey, assigned_to, request.user)
+        try:
+            assign_survey_owner(survey, assigned_to, request.user)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         out = SiteSurveySerializer(survey, context={'request': request})
         return Response(out.data)
 
@@ -236,7 +287,10 @@ class SiteSurveyViewSet(ScopedModelViewSet):
     def mark_completed(self, request, pk=None):
         from apps.sales.services import mark_survey_completed
         survey = self.get_object()
-        mark_survey_completed(survey, request.user)
+        try:
+            mark_survey_completed(survey, request.user)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         out = SiteSurveySerializer(survey, context={'request': request})
         return Response(out.data)
 
@@ -349,7 +403,7 @@ class ProposalVersionViewSet(ScopedModelViewSet):
         'send_to_client':           'sales_proposal.send_to_client',
         'client_response':          'sales_proposal.update',
         'clone_revision':           'sales_proposal.create',
-        'convert_to_onboarding':    'sales_proposal.approve',
+        'convert_to_onboarding':    'sales_proposal.update',
     }
 
     def get_serializer_class(self):
@@ -429,6 +483,26 @@ class ProposalVersionViewSet(ScopedModelViewSet):
                 {'detail': 'expires_days must be between 1 and 90.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        email_subject = str(request.data.get('email_subject') or '').strip()
+        if '\n' in email_subject or '\r' in email_subject:
+            return Response(
+                {'detail': 'email_subject must be a single line.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(email_subject) > 255:
+            return Response(
+                {'detail': 'email_subject must be 255 characters or fewer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        email_body = request.data.get('email_body')
+        if email_body is None:
+            email_body = request.data.get('note', '')
+        email_body = str(email_body or '').strip()
+        if len(email_body) > 5000:
+            return Response(
+                {'detail': 'email_body must be 5000 characters or fewer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             result = send_proposal_to_client(
                 proposal,
@@ -436,6 +510,8 @@ class ProposalVersionViewSet(ScopedModelViewSet):
                 recipient_email=request.data.get('recipient_email'),
                 recipient_name=request.data.get('recipient_name'),
                 expires_days=expires_days,
+                email_subject=email_subject,
+                email_body=email_body,
             )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -445,6 +521,8 @@ class ProposalVersionViewSet(ScopedModelViewSet):
             'token_expires_at': result['token_expires_at'],
             'email_sent': result['email_sent'],
             'recipient_email': result['recipient_email'],
+            'email_subject': result.get('email_subject', ''),
+            'email_body': result.get('email_body', ''),
         })
 
     @action(detail=True, methods=['post'], url_path='client-response')
@@ -485,9 +563,16 @@ class ProposalVersionViewSet(ScopedModelViewSet):
             convert_won_sales_lead_to_onboarding_setup,
             mark_lead_won_from_client_approval,
         )
+        from apps.access.scope import user_has_capability
         from apps.mobilisation.serializers import MobilisationSetupRequestSerializer
 
         from apps.sales.services import validate_proposal_ready_for_mobilisation_conversion
+
+        if not user_has_capability(request.user, 'mobilisation.create'):
+            return Response(
+                {'detail': 'You do not have permission to create mobilisation requests.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         proposal = self.get_object()
         lead = proposal.lead
@@ -747,11 +832,11 @@ class SiteSurveyScopeAnswerViewSet(_SurveyChildViewSetBase):
 
 class SiteSurveyShiftDeploymentViewSet(_SurveyChildViewSetBase):
     queryset = SiteSurveyShiftDeployment.objects.select_related(
-        'survey', 'survey__lead',
+        'survey', 'survey__lead', 'job_role',
     ).order_by('sort_order', 'id')
     serializer_class = SiteSurveyShiftDeploymentSerializer
-    filterset_fields = ['survey', 'line_type']
-    search_fields = ['description']
+    filterset_fields = ['survey', 'line_type', 'job_role']
+    search_fields = ['description', 'job_role__name', 'job_role__code']
 
 
 class SiteSurveyLocationLineViewSet(_SurveyChildViewSetBase):

@@ -27,6 +27,13 @@ class ProposalResponseThrottle(AnonRateThrottle):
 def _serialize_budget_line(line):
     return {
         'id': line.pk,
+        'site': line.site_id,
+        'site_id': line.site_id,
+        'site_name': line.site.site_name if line.site_id else None,
+        'role_requirement': line.role_requirement_id,
+        'job_role': line.job_role_id,
+        'job_role_id': line.job_role_id,
+        'job_role_name': line.job_role.name if line.job_role_id else None,
         'description': line.description,
         'service_category': line.service_category or '',
         'manpower_count': line.manpower_count,
@@ -39,6 +46,13 @@ def _serialize_budget_line(line):
 def _serialize_breakup_line(line):
     return {
         'id': line.pk,
+        'site': line.site_id,
+        'site_id': line.site_id,
+        'site_name': line.site.site_name if line.site_id else None,
+        'role_requirement': line.role_requirement_id,
+        'job_role': line.job_role_id,
+        'job_role_id': line.job_role_id,
+        'job_role_name': line.job_role.name if line.job_role_id else None,
         'component_name': line.component_name,
         'component_type': line.component_type,
         'percentage': str(line.percentage) if line.percentage is not None else None,
@@ -80,6 +94,7 @@ def _public_proposal_payload(proposal, *, token_record=None, already_responded=F
     if token_record is not None:
         data['expires_at'] = token_record.expires_at
         data['recipient_email'] = token_record.recipient_email
+        data['recipient_name'] = token_record.recipient_name or ''
     if already_responded:
         latest = proposal.client_responses.order_by('-created_at').first()
         if latest:

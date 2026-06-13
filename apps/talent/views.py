@@ -5,8 +5,10 @@ Phase Talent-Hiring-B: Candidate CRUD + Resume upload APIs.
 Phase Talent-Manual-Intake-A: Manual resume intake endpoint.
 """
 
+import csv
 from decimal import Decimal, InvalidOperation
 
+from django.http import HttpResponse
 from rest_framework import status as http_status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -30,16 +32,18 @@ from apps.access.viewsets import (
     ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMixin,
 )
 
-from django.db.models import Q
+from django.db.models import Count, Q
 
 from .models import (
     Candidate, Resume,
-    CandidateExperience, CandidateEducation, ParsedResume,
-    TalentResumeReview,
+    CandidateExperience, CandidateEducation, CandidateSkill, ParsedResume,
+    TalentResumeReview, ResumeImportBatch,
 )
 from .serializers import (
     CandidateSerializer, CandidateWriteSerializer,
     ResumeSerializer, ResumeWriteSerializer, ResumePatchSerializer,
+    ResumeBulkUploadSerializer, ResumeExcelImportSerializer,
+    ResumeImportBatchSerializer,
     CandidateExperienceSerializer, CandidateEducationSerializer,
     CandidateSkillSerializer,
     ParsedResumeSerializer,
@@ -49,8 +53,9 @@ from .serializers import (
     ResumeApplyReviewSerializer,
     TalentResumeReviewSerializer,
     ResumeDuplicateResolutionSerializer,
+    CandidateMergeSerializer,
 )
-from .services import normalize_phone, compute_file_hash
+from .services import normalize_phone, compute_file_hash, determine_document_type
 
 
 # ─── CandidateViewSet ─────────────────────────────────────────────────────────
@@ -60,7 +65,7 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
     Candidate CRUD — org-scoped.
     list/retrieve: candidate.read  |  create: candidate.create  |  patch: candidate.update
     """
-    queryset = Candidate.objects.select_related('org').all()
+    queryset = Candidate.objects.select_related('org', 'target_job_role').all()
     permission_classes = [IsAuthenticated, HasCapability]
     read_serializer_class = CandidateSerializer
     scope_filter = filter_candidates_for_user
@@ -71,12 +76,13 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
         'retrieve': CANDIDATE_READ,
         'create': CANDIDATE_CREATE,
         'partial_update': CANDIDATE_UPDATE,
+        'merge': CANDIDATE_UPDATE,
     }
 
     filterset_fields = [
         'org', 'source', 'is_blacklisted',
         'lifecycle_status', 'availability_status',
-        'is_duplicate', 'do_not_contact',
+        'is_duplicate', 'do_not_contact', 'target_job_role',
     ]
     search_fields = [
         'first_name', 'last_name', 'phone', 'email',
@@ -84,7 +90,12 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
     ]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().annotate(
+            profile_resume_count=Count('resumes', distinct=True),
+            profile_skill_count=Count('skills', distinct=True),
+            profile_experience_count=Count('experiences', distinct=True),
+            profile_education_count=Count('educations', distinct=True),
+        )
         skill = self.request.query_params.get('skill', '').strip()
         if skill:
             qs = qs.filter(
@@ -105,12 +116,77 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
             except InvalidOperation:
                 pass
 
-        return qs
+        target_role = self.request.query_params.get('target_job_role', '').strip()
+        if target_role:
+            qs = qs.filter(
+                Q(target_job_role_id=target_role) |
+                Q(resumes__target_job_role_id=target_role)
+            ).distinct()
+
+        document_type = self.request.query_params.get('document_type', '').strip().lower()
+        if document_type:
+            if document_type in {'pdf', 'docx', 'doc', 'txt'}:
+                qs = qs.filter(resumes__document_type=document_type)
+            elif document_type in {'xlsx', 'csv'}:
+                qs = qs.filter(
+                    resume_import_items__document_type=document_type,
+                    resume_import_items__batch__source_type='excel_import',
+                )
+            else:
+                qs = qs.filter(
+                    Q(resumes__document_type=document_type) |
+                    Q(resume_import_items__document_type=document_type)
+                )
+            qs = qs.distinct()
+
+        location = self.request.query_params.get('location', '').strip()
+        if location:
+            qs = qs.filter(
+                Q(current_location__icontains=location) |
+                Q(preferred_location__icontains=location)
+            )
+
+        source = self.request.query_params.get('source', '').strip()
+        if source:
+            qs = qs.filter(source=source)
+
+        source_type = self.request.query_params.get('source_type', '').strip()
+        if source_type:
+            qs = qs.filter(
+                Q(resumes__source_type=source_type) |
+                Q(resume_import_items__batch__source_type=source_type)
+            ).distinct()
+
+        return qs.order_by('last_name', 'first_name', 'id')
 
     def get_serializer_class(self):
         if self.action in ('create', 'partial_update', 'update'):
             return CandidateWriteSerializer
         return CandidateSerializer
+
+    def list(self, request, *args, **kwargs):
+        journey_status = request.query_params.get('journey_status', '').strip()
+        if not journey_status:
+            return super().list(request, *args, **kwargs)
+
+        queryset = self.filter_queryset(self.get_queryset())
+        from .services import candidate_journey_status
+
+        # Journey status is derived from candidate + hiring/deployment state, so
+        # filter it at the API layer until it is promoted to query annotations.
+        filtered = []
+        for candidate in queryset:
+            journey = candidate_journey_status(candidate)
+            setattr(candidate, '_candidate_journey_status', journey)
+            if journey.get('journey_status') == journey_status:
+                filtered.append(candidate)
+        page = self.paginate_queryset(filtered)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(filtered, many=True)
+        return Response(serializer.data)
 
     def perform_create(self, serializer):
         phone = serializer.validated_data['phone']
@@ -140,6 +216,28 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
         else:
             serializer.save()
 
+    @action(detail=True, methods=['post'], url_path='merge')
+    def merge(self, request, pk=None):
+        """POST /api/talent/candidates/{id}/merge/ — merge this duplicate into target_candidate."""
+        source_candidate = self.get_object()
+        ser = CandidateMergeSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        target_candidate = ser.validated_data['target_candidate']
+        if not request.user.is_superuser and target_candidate.org_id != request.user.org_id:
+            raise ValidationError({'target_candidate': 'Target candidate belongs to a different organization.'})
+        from .services import merge_candidate_service
+        result = merge_candidate_service(
+            source_candidate,
+            target_candidate,
+            request.user,
+            ser.validated_data.get('note', ''),
+        )
+        return Response({
+            'source_candidate': CandidateSerializer(result['source_candidate'], context={'request': request}).data,
+            'target_candidate': CandidateSerializer(result['target_candidate'], context={'request': request}).data,
+            'profile_quality': result['profile_quality'],
+        })
+
 
 # ─── ResumeViewSet ────────────────────────────────────────────────────────────
 
@@ -148,7 +246,9 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
     Resume upload (Mode A) + read API — org-scoped via candidate.
     list/retrieve: resume.read  |  create: resume.upload  |  patch: candidate.update
     """
-    queryset = Resume.objects.select_related('candidate', 'candidate__org').all()
+    queryset = Resume.objects.select_related(
+        'candidate', 'candidate__org', 'target_job_role',
+    ).all()
     permission_classes = [IsAuthenticated, HasCapability]
     read_serializer_class = ResumeSerializer
     scope_filter = filter_resumes_for_user
@@ -167,9 +267,18 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
         'review_history': RESUME_READ,
         'apply_review': CANDIDATE_UPDATE,
         'resolve_duplicate': CANDIDATE_UPDATE,
+        'bulk_upload': RESUME_UPLOAD,
+        'excel_import': RESUME_UPLOAD,
+        'excel_template': RESUME_READ,
+        'import_batches': RESUME_READ,
+        'import_batch_detail': RESUME_READ,
     }
 
-    filterset_fields = ['candidate', 'parsed_status', 'status', 'source_type']
+    filterset_fields = [
+        'candidate', 'parsed_status', 'status', 'source_type',
+        'target_job_role', 'target_role_source', 'import_batch_id',
+        'document_type',
+    ]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -192,12 +301,140 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
             original_filename=getattr(f, 'name', ''),
             content_type=getattr(f, 'content_type', ''),
             size_bytes=getattr(f, 'size', 0),
+            document_type=determine_document_type(
+                getattr(f, 'name', ''),
+                getattr(f, 'content_type', ''),
+            ),
             file_hash=compute_file_hash(f),
             status='uploaded',
             uploaded_by=self.request.user,
         )
+        target_role = serializer.validated_data.get('target_job_role')
+        if target_role and not candidate.target_job_role_id:
+            Candidate.objects.filter(pk=candidate.pk, target_job_role__isnull=True).update(
+                target_job_role=target_role,
+            )
         from .services import queue_resume_processing
         queue_resume_processing(serializer.instance)
+
+    @action(detail=False, methods=['post'], url_path='bulk-upload')
+    def bulk_upload(self, request):
+        """Upload multiple resume files after HR selects the target role."""
+        data = request.data.copy()
+        files = request.FILES.getlist('files') or request.FILES.getlist('files[]')
+        data.setlist('files', files)
+        ser = ResumeBulkUploadSerializer(data=data, context={'request': request})
+        ser.is_valid(raise_exception=True)
+        from .services import create_resume_import_batch
+        batch = create_resume_import_batch(
+            request.user,
+            ser.validated_data['files'],
+            ser.validated_data['target_job_role'],
+            ser.validated_data.get('source_type') or 'bulk_upload',
+            ser.validated_data.get('view_only_note') or '',
+        )
+        batch = self._get_import_batch_queryset().get(pk=batch.pk)
+        return Response(
+            ResumeImportBatchSerializer(batch, context={'request': request}).data,
+            status=http_status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=['get'], url_path='import-batches')
+    def import_batches(self, request):
+        """List recent bulk resume import batches."""
+        qs = self._get_import_batch_queryset()
+        target_role = request.query_params.get('target_job_role', '').strip()
+        if target_role:
+            qs = qs.filter(target_job_role_id=target_role)
+        status_filter = request.query_params.get('status', '').strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        document_type = request.query_params.get('document_type', '').strip()
+        if document_type:
+            qs = qs.filter(document_type=document_type)
+        source_type = request.query_params.get('source_type', '').strip()
+        if source_type:
+            qs = qs.filter(source_type=source_type)
+        created_by = request.query_params.get('created_by', '').strip()
+        if created_by:
+            qs = qs.filter(created_by_id=created_by)
+        created_from = request.query_params.get('created_from', '').strip()
+        if created_from:
+            qs = qs.filter(created_at__date__gte=created_from)
+        created_to = request.query_params.get('created_to', '').strip()
+        if created_to:
+            qs = qs.filter(created_at__date__lte=created_to)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = ResumeImportBatchSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        return Response(ResumeImportBatchSerializer(qs, many=True, context={'request': request}).data)
+
+    @action(detail=False, methods=['get'], url_path='excel-template')
+    def excel_template(self, request):
+        """Download the standard candidate Excel/CSV import template."""
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="candidate_import_template.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'full_name',
+            'phone',
+            'email',
+            'current_location',
+            'experience_years',
+            'current_role',
+            'current_company',
+            'skills',
+        ])
+        writer.writerow([
+            'Ramesh Yadav',
+            '9876543210',
+            'ramesh@example.com',
+            'Pune',
+            '4',
+            'Electrician',
+            'ABC Facility Services',
+            'wiring; panel maintenance; troubleshooting',
+        ])
+        return response
+
+    @action(detail=False, methods=['get'], url_path=r'import-batches/(?P<batch_id>[^/.]+)')
+    def import_batch_detail(self, request, batch_id=None):
+        """Get one bulk resume import batch with per-file statuses."""
+        try:
+            batch = self._get_import_batch_queryset().get(pk=batch_id)
+        except ResumeImportBatch.DoesNotExist:
+            raise ValidationError({'detail': 'Import batch not found.'})
+        return Response(ResumeImportBatchSerializer(batch, context={'request': request}).data)
+
+    @action(detail=False, methods=['post'], url_path='excel-import')
+    def excel_import(self, request):
+        """Import candidate rows from CSV/XLSX and tag them to a target role."""
+        ser = ResumeExcelImportSerializer(data=request.data, context={'request': request})
+        ser.is_valid(raise_exception=True)
+        from .services import import_candidates_from_excel
+        result = import_candidates_from_excel(
+            request.user,
+            ser.validated_data['file'],
+            default_target_job_role=ser.validated_data.get('target_job_role'),
+            source_type=ser.validated_data.get('source_type') or 'excel_import',
+        )
+        return Response(result, status=http_status.HTTP_201_CREATED)
+
+    def _get_import_batch_queryset(self):
+        qs = ResumeImportBatch.objects.select_related(
+            'org', 'target_job_role', 'created_by',
+        ).prefetch_related(
+            'items',
+            'items__candidate',
+            'items__resume',
+        )
+        if self.request.user.is_superuser:
+            return qs
+        org_id = getattr(self.request.user, 'org_id', None)
+        if not org_id:
+            return qs.none()
+        return qs.filter(org_id=org_id)
 
     @action(detail=True, methods=['get'], url_path='status')
     def resume_status(self, request, pk=None):
@@ -310,6 +547,10 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
         if source_type_filter:
             qs = qs.filter(source_type=source_type_filter)
 
+        document_type_filter = request.query_params.get('document_type', '').strip()
+        if document_type_filter:
+            qs = qs.filter(document_type=document_type_filter)
+
         uploaded_by_filter = request.query_params.get('uploaded_by', '').strip()
         if uploaded_by_filter:
             qs = qs.filter(uploaded_by_id=uploaded_by_filter)
@@ -415,6 +656,16 @@ class CandidateExperienceViewSet(_OrgScopedReadOnlyViewSet):
 class CandidateEducationViewSet(_OrgScopedReadOnlyViewSet):
     queryset = CandidateEducation.objects.select_related('candidate').all()
     serializer_class = CandidateEducationSerializer
+    required_capability = CANDIDATE_READ
+    filterset_fields = ['candidate']
+
+    def get_queryset(self):
+        return self._org_filter(super().get_queryset(), 'candidate__org_id')
+
+
+class CandidateSkillViewSet(_OrgScopedReadOnlyViewSet):
+    queryset = CandidateSkill.objects.select_related('candidate').all()
+    serializer_class = CandidateSkillSerializer
     required_capability = CANDIDATE_READ
     filterset_fields = ['candidate']
 

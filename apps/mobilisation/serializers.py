@@ -12,6 +12,7 @@ from .models import (
     MobilisationProposedDepartmentRole,
     MobilisationProposedUser,
 )
+from .role_validation import validate_client_user_access_role
 
 
 # ─── Proposed department — read / write serializers ──────────────────────────
@@ -217,6 +218,11 @@ class MobilisationProposedUserWriteSerializer(serializers.ModelSerializer):
                 errors['access_role'] = 'Access role must belong to the same organization.'
             elif not access_role.is_active:
                 errors['access_role'] = 'Access role is inactive.'
+            else:
+                try:
+                    validate_client_user_access_role(access_role, scope_level)
+                except ValueError as exc:
+                    errors['access_role'] = str(exc)
 
         if scope_level == 'site':
             if real_site is None:

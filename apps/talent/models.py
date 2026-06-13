@@ -42,6 +42,23 @@ RESUME_STATUS_CHOICES = [
     ('duplicate_file', 'Duplicate File'),
 ]
 
+RESUME_IMPORT_BATCH_STATUS_CHOICES = [
+    ('queued', 'Queued'),
+    ('processing', 'Processing'),
+    ('completed', 'Completed'),
+    ('completed_with_errors', 'Completed With Errors'),
+    ('failed', 'Failed'),
+]
+
+RESUME_IMPORT_ITEM_STATUS_CHOICES = [
+    ('queued', 'Queued'),
+    ('processing', 'Processing'),
+    ('indexed', 'Indexed'),
+    ('duplicate_file', 'Duplicate File'),
+    ('manual_review', 'Manual Review'),
+    ('failed', 'Failed'),
+]
+
 RESUME_SOURCE_TYPE_CHOICES = [
     ('qr_intake', 'QR Intake'),
     ('manual_upload', 'Manual Upload'),
@@ -49,6 +66,27 @@ RESUME_SOURCE_TYPE_CHOICES = [
     ('portal', 'Portal'),
     ('referral', 'Referral'),
     ('import_', 'Import'),
+    ('bulk_upload', 'Bulk Upload'),
+    ('excel_import', 'Excel Import'),
+    ('campaign', 'Campaign'),
+]
+
+DOCUMENT_TYPE_CHOICES = [
+    ('pdf', 'PDF'),
+    ('docx', 'DOCX'),
+    ('doc', 'DOC'),
+    ('txt', 'Text'),
+    ('xlsx', 'Excel'),
+    ('csv', 'CSV'),
+    ('unknown', 'Unknown'),
+]
+
+TARGET_ROLE_SOURCE_CHOICES = [
+    ('manual', 'Manual'),
+    ('bulk_upload', 'Bulk Upload'),
+    ('excel_import', 'Excel Import'),
+    ('campaign', 'Campaign'),
+    ('qr_intake', 'QR Intake'),
 ]
 
 SKILL_PROFICIENCY_CHOICES = [
@@ -98,6 +136,13 @@ class Candidate(TimeStampedModel):
     notice_period_days = models.PositiveIntegerField(null=True, blank=True)
     current_company = models.CharField(max_length=255, blank=True)
     current_role = models.CharField(max_length=255, blank=True)
+    target_job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='targeted_candidates',
+    )
     source_reference = models.CharField(max_length=255, blank=True)
     duplicate_of = models.ForeignKey(
         'self', on_delete=models.SET_NULL,
@@ -114,6 +159,7 @@ class Candidate(TimeStampedModel):
         indexes = [
             models.Index(fields=['org', 'lifecycle_status']),
             models.Index(fields=['org', 'availability_status']),
+            models.Index(fields=['org', 'target_job_role']),
             models.Index(fields=['email']),
             models.Index(fields=['phone_normalized']),
         ]
@@ -156,6 +202,9 @@ class Resume(models.Model):
         max_length=20, choices=RESUME_STATUS_CHOICES, default='uploaded',
     )
     file_hash = models.CharField(max_length=64, blank=True)
+    document_type = models.CharField(
+        max_length=16, choices=DOCUMENT_TYPE_CHOICES, default='unknown',
+    )
     raw_text = models.TextField(blank=True)
     cleaned_text = models.TextField(blank=True)
     extraction_engine = models.CharField(max_length=64, blank=True)
@@ -172,6 +221,20 @@ class Resume(models.Model):
     source_type = models.CharField(
         max_length=20, choices=RESUME_SOURCE_TYPE_CHOICES, default='manual_upload',
     )
+    target_job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='targeted_resumes',
+    )
+    target_role_source = models.CharField(
+        max_length=20,
+        choices=TARGET_ROLE_SOURCE_CHOICES,
+        blank=True,
+        default='',
+    )
+    import_batch_id = models.CharField(max_length=64, blank=True)
     source_intake_document = models.ForeignKey(
         'intake.IntakeDocument', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='resumes',
@@ -194,12 +257,128 @@ class Resume(models.Model):
         ]
         indexes = [
             models.Index(fields=['file_hash']),
+            models.Index(fields=['document_type']),
             models.Index(fields=['candidate', 'status']),
+            models.Index(fields=['target_job_role', 'status']),
+            models.Index(fields=['source_type', 'target_job_role']),
+            models.Index(fields=['import_batch_id']),
             models.Index(fields=['source_intake_document']),
         ]
 
     def __str__(self):
         return f"Resume of {self.candidate} ({self.status})"
+
+
+class ResumeImportBatch(TimeStampedModel):
+    """A bulk resume upload batch processed asynchronously."""
+
+    org = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='resume_import_batches')
+    target_job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resume_import_batches',
+    )
+    source_type = models.CharField(
+        max_length=20, choices=RESUME_SOURCE_TYPE_CHOICES, default='bulk_upload',
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=RESUME_IMPORT_BATCH_STATUS_CHOICES,
+        default='queued',
+    )
+    total_count = models.PositiveIntegerField(default=0)
+    processed_count = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    duplicate_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    manual_review_count = models.PositiveIntegerField(default=0)
+    view_only_note = models.CharField(max_length=255, blank=True)
+    import_file = models.FileField(upload_to='candidate_imports/%Y/%m/', null=True, blank=True)
+    original_filename = models.CharField(max_length=255, blank=True)
+    content_type = models.CharField(max_length=128, blank=True)
+    size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
+    document_type = models.CharField(
+        max_length=16, choices=DOCUMENT_TYPE_CHOICES, default='unknown',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resume_import_batches',
+    )
+
+    class Meta:
+        verbose_name = 'Resume Import Batch'
+        verbose_name_plural = 'Resume Import Batches'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['org', 'status']),
+            models.Index(fields=['org', 'target_job_role']),
+            models.Index(fields=['org', 'document_type']),
+            models.Index(fields=['created_by', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Resume import batch #{self.pk} ({self.status})"
+
+
+class ResumeImportItem(models.Model):
+    """One file within a bulk resume import batch."""
+
+    batch = models.ForeignKey(
+        ResumeImportBatch,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    file = models.FileField(upload_to='resume_imports/%Y/%m/', null=True, blank=True)
+    original_filename = models.CharField(max_length=255, blank=True)
+    content_type = models.CharField(max_length=128, blank=True)
+    size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
+    file_hash = models.CharField(max_length=64, blank=True)
+    document_type = models.CharField(
+        max_length=16, choices=DOCUMENT_TYPE_CHOICES, default='unknown',
+    )
+    row_number = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(
+        max_length=32,
+        choices=RESUME_IMPORT_ITEM_STATUS_CHOICES,
+        default='queued',
+    )
+    error_message = models.TextField(blank=True)
+    candidate = models.ForeignKey(
+        Candidate,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resume_import_items',
+    )
+    resume = models.ForeignKey(
+        Resume,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='import_items',
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Resume Import Item'
+        verbose_name_plural = 'Resume Import Items'
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['batch', 'status']),
+            models.Index(fields=['batch', 'document_type']),
+            models.Index(fields=['file_hash']),
+            models.Index(fields=['candidate']),
+            models.Index(fields=['resume']),
+        ]
+
+    def __str__(self):
+        return f"{self.original_filename or self.pk} ({self.status})"
 
 
 # ─── CandidateSkill ───────────────────────────────────────────────────────────

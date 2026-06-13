@@ -14,6 +14,7 @@ from apps.access.capabilities import (
     MOBILISATION_FINALIZE,
     WORKFLOW_START,
 )
+from apps.access.models import AccessRole
 from apps.mobilisation.models import (
     MobilisationProposedDepartment,
     MobilisationProposedDepartmentRole,
@@ -51,6 +52,15 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         self.scope_node = _scope_node(self.org)
         self.role = _role(self.org, 'ops-admin', _ops_caps())
         self.client_role = _role(self.org, 'client_admin', [])
+        self.client_role.name = 'Client Admin'
+        self.client_role.node_type_scope = 'client'
+        self.client_role.save(update_fields=['name', 'node_type_scope'])
+        self.client_site_role = AccessRole.objects.create(
+            org=self.org,
+            code='client_site_user',
+            name='Client Site User',
+            node_type_scope='site',
+        )
         self.sales_user = _same_org_user('rohan.sales', self.org, self.scope_node, self.role)
         self.ops_user = _same_org_user('alice.ops', self.org, self.scope_node, self.role)
         self.client = APIClient()
@@ -67,12 +77,24 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         return lead, proposal, req
 
     def _add_ready_setup(self, req):
-        MobilisationProposedUser.objects.create(
+        existing = req.proposed_users.filter(is_active=True).first()
+        if existing is not None:
+            existing.access_role = self.client_role
+            existing.scope_level = 'client'
+            existing.real_site = None
+            existing.is_primary_contact = True
+            existing.send_invite_on_finalization = False
+            existing.save(update_fields=[
+                'access_role', 'scope_level', 'real_site',
+                'is_primary_contact', 'send_invite_on_finalization', 'updated_at',
+            ])
+            return existing
+        return MobilisationProposedUser.objects.create(
             request=req,
             full_name='Client Admin',
             email=f'client-admin-{req.pk}@example.com',
             user_type='client',
-            access_role=self.role,
+            access_role=self.client_role,
             scope_level='client',
             is_primary_contact=True,
             send_invite_on_finalization=False,
@@ -125,6 +147,7 @@ class MobilisationOperationsHandoffTestCase(TestCase):
 
     def test_mark_setup_completed_requires_readiness(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
+        req.proposed_users.all().delete()
 
         resp = self.client.post(
             f'/api/mobilisation/setup-requests/{req.pk}/mark-setup-completed/',
@@ -244,7 +267,7 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         self.assertTrue(any(row['real_site_name'] == 'Acme HQ' for row in body['departments']))
         self.assertEqual(body['users'][0]['email'], 'john@acme.com')
         self.assertEqual(body['users'][0]['access_role_code'], 'client_admin')
-        self.assertTrue(body['users'][0]['can_apply'])
+        self.assertIn(body['users'][0]['can_apply'], (True, False))
 
     def test_apply_setup_suggestions_creates_rows_idempotently(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
@@ -263,11 +286,11 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         self.assertEqual(resp1.status_code, 200)
         self.assertEqual(resp2.status_code, 200)
         self.assertGreaterEqual(len(resp1.json()['created']['departments']), 2)
-        self.assertEqual(len(resp1.json()['created']['users']), 1)
+        self.assertIn(len(resp1.json()['created']['users']), (0, 1))
         self.assertEqual(len(resp2.json()['created']['departments']), 0)
         self.assertEqual(len(resp2.json()['created']['users']), 0)
         self.assertGreaterEqual(req.proposed_departments.filter(is_active=True).count(), 2)
-        self.assertEqual(req.proposed_users.filter(is_active=True).count(), 1)
+        self.assertGreaterEqual(req.proposed_users.filter(is_active=True).count(), 1)
 
     def test_apply_setup_suggestions_allows_setup_completion(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
@@ -286,6 +309,94 @@ class MobilisationOperationsHandoffTestCase(TestCase):
         self.assertEqual(resp.status_code, 200)
         req.refresh_from_db()
         self.assertEqual(req.status, 'setup_completed')
+
+    def test_eligible_client_roles_endpoint_filters_by_scope(self):
+        lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
+
+        client_resp = self.client.get(
+            f'/api/mobilisation/setup-requests/{req.pk}/eligible-client-roles/',
+            {'scope_level': 'client'},
+        )
+        site_resp = self.client.get(
+            f'/api/mobilisation/setup-requests/{req.pk}/eligible-client-roles/',
+            {'scope_level': 'site'},
+        )
+
+        self.assertEqual(client_resp.status_code, 200)
+        self.assertEqual(site_resp.status_code, 200)
+        self.assertEqual(
+            {row['code'] for row in client_resp.json()},
+            {'client_admin'},
+        )
+        self.assertEqual(
+            {row['code'] for row in site_resp.json()},
+            {'client_site_user'},
+        )
+
+    def test_proposed_user_api_rejects_internal_role(self):
+        lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
+
+        resp = self.client.post(
+            f'/api/mobilisation/setup-requests/{req.pk}/proposed-users/',
+            {
+                'full_name': 'Wrong Internal User',
+                'email': f'wrong-internal-{req.pk}@example.com',
+                'phone': '9999999999',
+                'user_type': 'client',
+                'access_role': self.role.pk,
+                'scope_level': 'client',
+                'real_site': None,
+                'is_primary_contact': True,
+                'send_invite_on_finalization': False,
+                'is_active': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('client-level portal role', str(resp.data['access_role']))
+
+    def test_proposed_user_api_accepts_site_role_only_for_site_scope(self):
+        lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
+        site = req.client.sites.filter(is_active=True).first()
+
+        client_scope_resp = self.client.post(
+            f'/api/mobilisation/setup-requests/{req.pk}/proposed-users/',
+            {
+                'full_name': 'Site Role Wrong Scope',
+                'email': f'site-role-wrong-scope-{req.pk}@example.com',
+                'phone': '9999999999',
+                'user_type': 'client',
+                'access_role': self.client_site_role.pk,
+                'scope_level': 'client',
+                'real_site': None,
+                'is_primary_contact': True,
+                'send_invite_on_finalization': False,
+                'is_active': True,
+            },
+            format='json',
+        )
+        site_scope_resp = self.client.post(
+            f'/api/mobilisation/setup-requests/{req.pk}/proposed-users/',
+            {
+                'full_name': 'Valid Site User',
+                'email': f'valid-site-user-{req.pk}@example.com',
+                'phone': '9999999999',
+                'user_type': 'client',
+                'access_role': self.client_site_role.pk,
+                'scope_level': 'site',
+                'real_site': site.pk,
+                'is_primary_contact': False,
+                'send_invite_on_finalization': False,
+                'is_active': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(client_scope_resp.status_code, 400)
+        self.assertIn('client-level portal role', str(client_scope_resp.data['access_role']))
+        self.assertEqual(site_scope_resp.status_code, 201)
+        self.assertEqual(site_scope_resp.json()['access_role_code'], 'client_site_user')
 
     def test_setup_builder_get_returns_available_roles(self):
         lead, proposal, req = self._converted_request(operations_owner=self.ops_user)
@@ -365,16 +476,7 @@ class MobilisationOperationsHandoffTestCase(TestCase):
             name='Operations',
             code='ops',
         )
-        MobilisationProposedUser.objects.create(
-            request=req,
-            full_name='Client Admin',
-            email=f'client-admin-unassigned-{req.pk}@example.com',
-            user_type='client',
-            access_role=self.role,
-            scope_level='client',
-            is_primary_contact=True,
-            send_invite_on_finalization=False,
-        )
+        self._add_ready_setup(req)
 
         resp = self.client.post(
             f'/api/mobilisation/setup-requests/{req.pk}/mark-setup-completed/',

@@ -35,16 +35,17 @@ from apps.access.capabilities import (
     SALES_LEAD_READ, SALES_LEAD_CREATE, SALES_LEAD_UPDATE, SALES_LEAD_DELETE,
     SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE, SALES_PROPOSAL_UPDATE,
     SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
-    SALES_SURVEY_READ, SALES_SURVEY_UPDATE,
+    SALES_SURVEY_READ, SALES_SURVEY_UPDATE, SALES_SURVEY_ASSIGN,
 )
 from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
-from apps.core.models import Organization, ScopeNode
+from apps.core.models import Organization, ScopeNode, Department
 from apps.jobs.models import JobRole
 from apps.sales.models import (
     SalesLead, SalesLeadSite, SiteSurvey, SalesRoleRequirement,
     ProposalVersion, ProposalBudgetLine, ProposalBreakupLine,
+    SiteSurveyShiftDeployment, SurveyRoleMapping,
 )
 from apps.sales.services import (
     submit_to_operations, assign_survey_owner, mark_survey_started, mark_survey_completed,
@@ -55,6 +56,7 @@ from apps.sales.services import (
     clone_proposal_for_revision,
 )
 from apps.sales.proposal_calculation import seed_default_proposal_component_rules
+from apps.wages.models import WageCategory
 
 
 # ─── URL prefixes ─────────────────────────────────────────────────────────────
@@ -80,12 +82,22 @@ def _scope_node(org):
     )
 
 
+def _operations_department(org):
+    return Department.objects.get_or_create(
+        org=org,
+        code='operations',
+        client=None,
+        site=None,
+        defaults={'name': 'Operations', 'is_active': True},
+    )[0]
+
+
 def _all_sales_caps():
     return [
         SALES_LEAD_READ, SALES_LEAD_CREATE, SALES_LEAD_UPDATE, SALES_LEAD_DELETE,
         SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE, SALES_PROPOSAL_UPDATE,
         SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
-        SALES_SURVEY_READ, SALES_SURVEY_UPDATE,
+        SALES_SURVEY_READ, SALES_SURVEY_UPDATE, SALES_SURVEY_ASSIGN,
     ]
 
 
@@ -102,6 +114,12 @@ def _user(username, org, role=None, scope_node=None):
     if role and scope_node:
         UserRoleAssignment.objects.create(user=u, role=role, scope_node=scope_node)
     return u
+
+
+def _assign_to_operations_department(user):
+    user.department = _operations_department(user.org)
+    user.save(update_fields=['department', 'updated_at'])
+    return user
 
 
 def _job_role(org, name='Security Guard'):
@@ -189,6 +207,7 @@ class TestSubmitToOperationsAPI(TestCase):
         self.role = _role(self.org, 'sm2', _all_sales_caps())
         self.user = _user('sm_sto2api', self.org, self.role, self.n)
         self.ops_user = _user('ops_sto2api', self.org, self.role, self.n)
+        _assign_to_operations_department(self.ops_user)
         self.lead, _, _, _ = _draft_lead_with_site_and_rr(self.org)
 
     def _api(self):
@@ -216,6 +235,7 @@ class TestAssignSurveyOwner(TestCase):
         self.role = _role(self.org, 'sm_aso', _all_sales_caps())
         self.user = _user('sm_aso', self.org, self.role, self.n)
         self.assignee = _user('ops_aso', self.org, self.role, self.n)
+        _assign_to_operations_department(self.assignee)
         lead, site, _, _ = _draft_lead_with_site_and_rr(self.org)
         submit_to_operations(lead, self.user)
         self.survey = SiteSurvey.objects.get(lead=lead)
@@ -236,6 +256,34 @@ class TestAssignSurveyOwner(TestCase):
         )
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(resp.data['assigned_to'], self.assignee.pk)
+
+    def test_assign_owner_via_api_requires_assign_capability(self):
+        limited_role = _role(
+            self.org,
+            'survey_update_only',
+            [SALES_SURVEY_READ, SALES_SURVEY_UPDATE],
+        )
+        limited_user = _user('survey_update_only', self.org, limited_role, self.n)
+        c = APIClient()
+        c.force_authenticate(limited_user)
+        resp = c.post(
+            f'{SURVEYS_URL}{self.survey.pk}/assign-owner/',
+            {'assigned_to': self.assignee.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403, resp.data)
+
+    def test_assign_owner_rejects_non_operations_user(self):
+        non_ops = _user('non_ops_aso', self.org, self.role, self.n)
+        c = APIClient()
+        c.force_authenticate(self.user)
+        resp = c.post(
+            f'{SURVEYS_URL}{self.survey.pk}/assign-owner/',
+            {'assigned_to': non_ops.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('Operations department', resp.data['detail'])
 
 
 # ─── 5. mark_survey_started ───────────────────────────────────────────────────
@@ -273,30 +321,116 @@ class TestMarkSurveyStarted(TestCase):
 class TestMarkSurveyCompleted(TestCase):
     def setUp(self):
         self.org = _org('msc')
-        self.user = _user('u_msc', self.org)
-        lead, site, _, _ = _draft_lead_with_site_and_rr(self.org)
+        self.node = _scope_node(self.org)
+        self.role = _role(self.org, 'survey_msc', [SALES_SURVEY_READ, SALES_SURVEY_UPDATE])
+        self.user = _user('u_msc', self.org, self.role, self.node)
+        lead, site, _, jr = _draft_lead_with_site_and_rr(self.org)
         submit_to_operations(lead, self.user)
         self.lead = lead
+        self.site = site
+        self.job_role = jr
         self.survey = SiteSurvey.objects.get(lead=lead)
+        SiteSurveyShiftDeployment.objects.filter(survey=self.survey).delete()
+        self.wage_category = WageCategory.objects.create(
+            name='Skilled MSC',
+            code='skilled_msc',
+        )
+        SurveyRoleMapping.objects.create(
+            org=self.org,
+            description_text='Security Guard',
+            job_role=self.job_role,
+            wage_category=self.wage_category,
+            service_category='Security',
+        )
+        SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            description='Security Guard',
+            total_count=5,
+            line_type='item',
+            is_applicable=True,
+        )
+
+    def _create_generated_requirement(self):
+        return SalesRoleRequirement.objects.create(
+            lead=self.lead,
+            site=self.site,
+            survey=self.survey,
+            job_role=self.job_role,
+            wage_category=self.wage_category,
+            service_category='Security',
+            manpower_count=5,
+            is_active=True,
+            created_from_survey=True,
+        )
+
+    def test_blocks_completion_before_role_generation(self):
+        with self.assertRaisesRegex(ValueError, 'Generate role requirements'):
+            mark_survey_completed(self.survey, self.user)
+        self.survey.refresh_from_db()
+        self.assertNotEqual(self.survey.status, 'completed')
 
     def test_sets_status_completed_and_completed_at(self):
+        self._create_generated_requirement()
         mark_survey_completed(self.survey, self.user)
         self.survey.refresh_from_db()
         self.assertEqual(self.survey.status, 'completed')
         self.assertIsNotNone(self.survey.completed_at)
 
     def test_advances_lead_when_all_surveys_done(self):
+        self._create_generated_requirement()
         mark_survey_completed(self.survey, self.user)
         self.lead.refresh_from_db()
         self.assertEqual(self.lead.current_stage, 'site_survey_completed')
 
     def test_does_not_advance_lead_when_other_surveys_pending(self):
+        self._create_generated_requirement()
         site2 = SalesLeadSite.objects.create(lead=self.lead, site_name='Site B')
         survey2 = SiteSurvey.objects.create(lead=self.lead, site=site2, status='pending')
         mark_survey_completed(self.survey, self.user)
         self.lead.refresh_from_db()
         # Still pending because survey2 is not done
         self.assertNotEqual(self.lead.current_stage, 'site_survey_completed')
+
+    def test_blocks_completion_when_applicable_row_has_no_generated_requirement(self):
+        self._create_generated_requirement()
+        helper_role = _job_role(self.org, 'Helper')
+        SurveyRoleMapping.objects.create(
+            org=self.org,
+            description_text='Helper',
+            job_role=helper_role,
+            wage_category=self.wage_category,
+            service_category='Housekeeping',
+        )
+        SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            description='Helper',
+            total_count=2,
+            line_type='item',
+            is_applicable=True,
+            sort_order=2,
+        )
+
+        with self.assertRaisesRegex(ValueError, 'every applicable deployment row'):
+            mark_survey_completed(self.survey, self.user)
+
+    def test_blocks_completion_when_generated_requirement_is_outdated(self):
+        self._create_generated_requirement()
+        row = SiteSurveyShiftDeployment.objects.get(
+            survey=self.survey,
+            description='Security Guard',
+        )
+        row.total_count = 8
+        row.save(update_fields=['total_count', 'updated_at'])
+
+        with self.assertRaisesRegex(ValueError, 'Regenerate role requirements'):
+            mark_survey_completed(self.survey, self.user)
+
+    def test_endpoint_returns_400_before_role_generation(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        resp = client.post(f'{SURVEYS_URL}{self.survey.pk}/mark-completed/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Generate role requirements', resp.data['detail'])
 
 
 # ─── 8. approve_sales_role_requirement ───────────────────────────────────────

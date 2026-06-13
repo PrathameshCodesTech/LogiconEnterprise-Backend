@@ -49,7 +49,8 @@ from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.sales.models import (
     SalesLead, SalesLeadSite, SalesRoleRequirement, SiteSurvey,
-    SalesLeadActivity, SalesDocument,
+    SalesLeadActivity, SalesDocument, SiteSurveyShiftDeployment,
+    SurveyRoleMapping,
 )
 from apps.sales.services import (
     assign_survey_owner,
@@ -202,6 +203,27 @@ class TestActivityLogging(TestCase):
         lead, site, rr, jr, survey = _submitted_lead(self.org, self.user)
         SiteSurvey.objects.filter(pk=survey.pk).update(status='in_progress')
         survey.refresh_from_db()
+        SiteSurveyShiftDeployment.objects.filter(survey=survey).delete()
+        wage_category = ensure_wage_category()
+        SurveyRoleMapping.objects.create(
+            org=self.org,
+            description_text=jr.name,
+            job_role=jr,
+            wage_category=wage_category,
+            service_category='Security',
+        )
+        SiteSurveyShiftDeployment.objects.create(
+            survey=survey,
+            description=jr.name,
+            total_count=rr.manpower_count,
+            line_type='item',
+            is_applicable=True,
+        )
+        rr.survey = survey
+        rr.wage_category = wage_category
+        rr.created_from_survey = True
+        rr.is_active = True
+        rr.save(update_fields=['survey', 'wage_category', 'created_from_survey', 'is_active', 'updated_at'])
         mark_survey_completed(survey, self.user)
         self.assertEqual(self._activity_count(lead, 'survey_completed'), 1)
 

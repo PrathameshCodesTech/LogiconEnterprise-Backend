@@ -289,17 +289,20 @@ class Command(BaseCommand):
 
         created_count = 0
         existed_count = 0
+        removed_count = 0
         skipped_count = 0
 
         for role_code, role in roles.items():
             capabilities = ROLE_CAPABILITIES.get(role_code, [])
             if not capabilities:
                 self.stderr.write(f'  [AccessRolePermission] WARNING: no capabilities for role {role_code}')
+            desired_permission_ids = set()
             for capability in capabilities:
                 permission = permissions.get(capability)
                 if permission is None:
                     skipped_count += 1
                     continue
+                desired_permission_ids.add(permission.pk)
                 _, created = AccessRolePermission.objects.get_or_create(
                     role=role,
                     permission=permission,
@@ -308,8 +311,13 @@ class Command(BaseCommand):
                     created_count += 1
                 else:
                     existed_count += 1
+            removed_count += AccessRolePermission.objects.filter(
+                role=role,
+            ).exclude(permission_id__in=desired_permission_ids).delete()[0]
 
         message = f'  [AccessRolePermission] Created: {created_count}, Existed: {existed_count}'
+        if removed_count:
+            message += f', Removed stale: {removed_count}'
         if skipped_count:
             message += f', Skipped: {skipped_count}'
         self.stdout.write(message)
@@ -340,11 +348,17 @@ class Command(BaseCommand):
                 'org': org,
                 'is_active': True,
             }
-            user, created = User.objects.get_or_create(
-                username=definition['username'],
-                defaults=user_defaults,
-            )
+            user = User.objects.filter(username=definition['username']).first()
+            created = False
+            if user is None:
+                user = User.objects.filter(email=definition['email']).first()
+            if user is None:
+                user = User(username=definition['username'])
+                created = True
             changed_fields = []
+            if user.username != definition['username']:
+                user.username = definition['username']
+                changed_fields.append('username')
             for field, value in user_defaults.items():
                 if getattr(user, field) != value:
                     setattr(user, field, value)

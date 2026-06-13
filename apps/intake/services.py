@@ -9,13 +9,14 @@ Intake submission business logic:
 import re
 from pathlib import Path
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError, connection
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.talent.models import Candidate
+from apps.talent.models import Candidate, CandidateSkill
 from .models import (
     IntakeSubmission,
     IntakeSubmissionAnswer,
@@ -104,6 +105,109 @@ def get_or_create_candidate(org, phone_normalized: str, first_name: str,
             candidate.save(update_fields=update_fields)
 
     return candidate, created
+
+
+def _answer_value_by_key(answers_data: list) -> dict:
+    values = {}
+    for ans in answers_data or []:
+        field_obj = ans.get('field') or ans.get('template_field')
+        if not field_obj:
+            continue
+        values[field_obj.field_key] = ans.get('value')
+    return values
+
+
+def _first_answer_value(values: dict, *keys):
+    for key in keys:
+        value = values.get(key)
+        if value not in ('', None, []):
+            return value
+    return None
+
+
+def _decimal_or_none(value):
+    if value in ('', None, []):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _split_skill_values(value) -> list[str]:
+    if value in ('', None, []):
+        return []
+    if isinstance(value, list):
+        raw_parts = value
+    else:
+        raw_parts = re.split(r'[,;\n|]+', str(value))
+    skills = []
+    for part in raw_parts:
+        cleaned = str(part).strip()
+        if cleaned:
+            skills.append(cleaned)
+    return skills
+
+
+def _sync_candidate_from_submission(candidate, submission, answers_data: list) -> None:
+    """
+    Promote known QR intake fields into the talent profile.
+
+    Dynamic form answers remain the submission audit source; this only fills
+    stable candidate fields used by resume-pool search and demand matching.
+    """
+    values = _answer_value_by_key(answers_data)
+    updates = {}
+
+    if submission.job_role_id and not candidate.target_job_role_id:
+        updates['target_job_role'] = submission.job_role
+    if submission.job_role_id and not candidate.current_role:
+        updates['current_role'] = submission.job_role.name
+    if not candidate.source_reference:
+        updates['source_reference'] = f'qr_campaign:{submission.campaign_id}:submission:{submission.pk}'
+
+    email = _first_answer_value(values, 'email', 'email_id', 'candidate_email')
+    if email and not candidate.email:
+        updates['email'] = str(email).strip()
+
+    location = _first_answer_value(
+        values,
+        'current_location',
+        'location',
+        'city',
+        'preferred_location',
+    )
+    if location and not candidate.current_location:
+        updates['current_location'] = str(location).strip()
+
+    experience = _decimal_or_none(
+        _first_answer_value(
+            values,
+            'total_experience_years',
+            'experience_years',
+            'experience',
+            'years_experience',
+        )
+    )
+    if experience is not None and candidate.total_experience_years is None:
+        updates['total_experience_years'] = experience
+
+    if updates:
+        for field, value in updates.items():
+            setattr(candidate, field, value)
+        candidate.save(update_fields=list(updates.keys()) + ['updated_at'])
+
+    skill_value = _first_answer_value(values, 'skills', 'skill', 'known_skills')
+    for skill in _split_skill_values(skill_value):
+        normalized = skill.lower()
+        CandidateSkill.objects.get_or_create(
+            candidate=candidate,
+            normalized_skill_name=normalized,
+            defaults={
+                'skill_name': skill,
+                'source': 'qr_intake',
+            },
+        )
 
 
 # Duplicate detection
@@ -327,6 +431,7 @@ def create_intake_submission(validated_data: dict, request=None) -> IntakeSubmis
     )
 
     answers_data = validated_data.get('answers', [])
+    _sync_candidate_from_submission(candidate, submission, answers_data)
     if answers_data:
         bulk_answers = []
         for ans in answers_data:
@@ -352,7 +457,7 @@ def _link_resume_if_needed(doc: IntakeDocument, candidate) -> None:
     if doc.document_type != 'resume':
         return
     from apps.talent.models import Resume
-    from apps.talent.services import compute_file_hash, queue_resume_processing
+    from apps.talent.services import compute_file_hash, determine_document_type, queue_resume_processing
 
     file_hash = ''
     try:
@@ -371,8 +476,22 @@ def _link_resume_if_needed(doc: IntakeDocument, candidate) -> None:
             'source_type': 'qr_intake',
             'status': 'uploaded',
             'file_hash': file_hash,
+            'document_type': determine_document_type(doc.original_filename, doc.content_type),
+            'target_job_role': doc.submission.job_role,
+            'target_role_source': 'qr_intake' if doc.submission.job_role_id else '',
         },
     )
+
+    if not created:
+        updates = {}
+        document_type = determine_document_type(doc.original_filename, doc.content_type)
+        if resume.document_type in ('', 'unknown') and document_type != 'unknown':
+            updates['document_type'] = document_type
+        if not resume.target_job_role_id and doc.submission.job_role_id:
+            updates['target_job_role'] = doc.submission.job_role
+            updates['target_role_source'] = 'qr_intake'
+        if updates:
+            Resume.objects.filter(pk=resume.pk).update(**updates)
 
     if created:
         queue_resume_processing(resume)

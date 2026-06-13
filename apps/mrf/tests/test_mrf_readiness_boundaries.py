@@ -249,19 +249,95 @@ class TestBudgetBoundaries(ReadinessBase):
 
     def test_R11_non_billable_dept_budget_mismatch_fails(self):
         dept2 = Department.objects.create(org=self.org, name='Other Dept', code='other-dept-r11')
-        bp = self._bp('non_billable', code='bp-r11', department=dept2)
-        mrf = self._mrf(billing_type='non_billable', budget_plan=bp, requesting_department=self.dept)
+        bp = self._bp('non_billable', code='bp-r11', department=dept2, budget_type='hiring')
+        mrf = self._mrf(
+            billing_type='non_billable', budget_plan=bp,
+            requesting_department=self.dept, required_department=self.dept,
+        )
         self._li(mrf, headcount=2, budget_max=Decimal('500.00'))
         r = check_mrf_readiness(mrf)
         self.assertFalse(r['ok'])
         self.assertTrue(any('department' in e.lower() for e in r['errors']))
 
     def test_R12_non_billable_dept_budget_match_passes(self):
-        bp = self._bp('non_billable', amount=10000, code='bp-r12', department=self.dept)
-        mrf = self._mrf(billing_type='non_billable', budget_plan=bp, requesting_department=self.dept)
+        bp = self._bp(
+            'non_billable',
+            amount=10000,
+            code='bp-r12',
+            department=self.dept,
+            budget_type='hiring',
+        )
+        mrf = self._mrf(
+            billing_type='non_billable', budget_plan=bp,
+            requesting_department=self.dept, required_department=self.dept,
+        )
         self._li(mrf, headcount=2, budget_max=Decimal('500.00'))
         r = check_mrf_readiness(mrf)
         self.assertTrue(r['ok'], r['errors'])
+
+    def test_R12a_non_billable_non_hiring_budget_fails(self):
+        bp = self._bp(
+            'non_billable',
+            amount=10000,
+            code='bp-r12a',
+            department=self.dept,
+            budget_type='general',
+        )
+        mrf = self._mrf(
+            billing_type='non_billable', budget_plan=bp,
+            requesting_department=self.dept, required_department=self.dept,
+        )
+        self._li(mrf, headcount=2, budget_max=Decimal('500.00'))
+        r = check_mrf_readiness(mrf)
+        self.assertFalse(r['ok'])
+        self.assertTrue(any('internal hiring budget' in e.lower() for e in r['errors']))
+
+    def test_R12b_non_billable_missing_required_department_fails(self):
+        mrf = self._mrf(billing_type='non_billable', requesting_department=self.dept)
+        self._li(mrf, headcount=2, budget_max=Decimal('500.00'))
+
+        r = check_mrf_readiness(mrf)
+        self.assertFalse(r['ok'])
+        self.assertTrue(any('required department' in e.lower() for e in r['errors']))
+
+    def test_R12c_non_billable_auto_resolves_required_department_budget(self):
+        bp = self._bp(
+            'non_billable',
+            amount=10000,
+            code='bp-r12c',
+            department=self.dept,
+            budget_type='hiring',
+        )
+        mrf = self._mrf(
+            billing_type='non_billable',
+            requesting_department=self.dept,
+            required_department=self.dept,
+        )
+        self._li(mrf, headcount=2, budget_max=Decimal('500.00'))
+
+        r = check_mrf_readiness(mrf)
+        self.assertTrue(r['ok'], r['errors'])
+        self.assertEqual(r['budget']['plan_id'], bp.pk)
+        self.assertEqual(r['budget']['scope'], 'department')
+
+    def test_R12d_non_billable_insufficient_department_budget_fails(self):
+        self._bp(
+            'non_billable',
+            amount=100,
+            code='bp-r12d',
+            department=self.dept,
+            budget_type='hiring',
+        )
+        mrf = self._mrf(
+            billing_type='non_billable',
+            requesting_department=self.dept,
+            required_department=self.dept,
+        )
+        self._li(mrf, headcount=2, budget_max=Decimal('500.00'))
+
+        r = check_mrf_readiness(mrf)
+        self.assertFalse(r['ok'])
+        self.assertTrue(any('insufficient budget' in e.lower() for e in r['errors']))
 
     def test_R13_insufficient_budget_fails(self):
         bp = self._bp('billable', amount=100, code='bp-r13')

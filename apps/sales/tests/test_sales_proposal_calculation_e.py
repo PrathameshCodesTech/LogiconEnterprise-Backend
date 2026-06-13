@@ -29,6 +29,8 @@ from apps.sales.proposal_calculation import (
 from apps.sales.services import (
     generate_proposal_version,
     submit_to_operations,
+    submit_proposal_for_internal_approval,
+    mark_proposal_internally_approved,
     clone_proposal_for_revision,
 )
 from apps.sales.tests.proposal_wage_fixtures import (
@@ -155,6 +157,29 @@ class TestProposalGeneration(TestCase):
         self.assertIn('Basic', names)
         self.assertIn('Role Monthly Total', names)
         self.assertIn('Employer PF', names)
+        self.assertFalse(proposal.breakup_lines.filter(role_requirement__isnull=True).exists())
+
+    def test_submit_rejects_unmapped_breakup_lines(self):
+        proposal = generate_proposal_version(self.lead, self.user)
+        line = proposal.breakup_lines.first()
+        line.role_requirement = None
+        line.save(update_fields=['role_requirement', 'updated_at'])
+
+        with self.assertRaises(ValueError) as ctx:
+            submit_proposal_for_internal_approval(proposal, self.user)
+        self.assertIn('Salary breakup is missing role mapping', str(ctx.exception))
+
+    def test_internal_approval_rejects_unmapped_breakup_lines(self):
+        proposal = generate_proposal_version(self.lead, self.user)
+        proposal.status = 'submitted_internal'
+        proposal.save(update_fields=['status', 'updated_at'])
+        line = proposal.breakup_lines.first()
+        line.role_requirement = None
+        line.save(update_fields=['role_requirement', 'updated_at'])
+
+        with self.assertRaises(ValueError) as ctx:
+            mark_proposal_internally_approved(proposal, self.user)
+        self.assertIn('Salary breakup is missing role mapping', str(ctx.exception))
 
     def test_manpower_total_equals_sum_requirements(self):
         proposal = generate_proposal_version(self.lead, self.user)

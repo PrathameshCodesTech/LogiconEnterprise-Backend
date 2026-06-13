@@ -175,6 +175,14 @@ class TestPublicProposalResponseAPI(TestCase):
         self.assertEqual(resp.data['proposal_version_number'], self.proposal.version_number)
         self.assertIn('budget_lines', resp.data)
         self.assertIn('breakup_lines', resp.data)
+        budget_line = resp.data['budget_lines'][0]
+        breakup_line = resp.data['breakup_lines'][0]
+        self.assertIn('role_requirement', budget_line)
+        self.assertIn('job_role_name', budget_line)
+        self.assertIn('site_name', budget_line)
+        self.assertIn('role_requirement', breakup_line)
+        self.assertIn('job_role_name', breakup_line)
+        self.assertIn('site_name', breakup_line)
         self.assertFalse(resp.data['already_responded'])
 
     def test_invalid_token_rejected(self):
@@ -274,6 +282,55 @@ class TestSendToClientAPI(TestCase):
         self.assertTrue(resp.data['email_sent'])
         self.assertEqual(resp.data['recipient_email'], 'buyer@acme.com')
         self.assertIn('token_expires_at', resp.data)
+
+    def test_send_to_client_uses_custom_email_draft_and_stores_redacted_snapshot(self):
+        resp = self.client.post(
+            f'{PROPOSALS_URL}{self.proposal.pk}/send-to-client/',
+            {
+                'recipient_email': 'buyer@acme.com',
+                'email_subject': 'Please review revised commercial proposal',
+                'email_body': 'Dear Buyer,\nPlease review the attached commercial proposal and respond today.',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(mail.outbox[-1].subject, 'Please review revised commercial proposal')
+        self.assertIn('Dear Buyer', mail.outbox[-1].body)
+        self.assertIn('Review proposal:', mail.outbox[-1].body)
+        self.assertIn('proposal-response?token=', mail.outbox[-1].body)
+
+        token = SalesProposalClientToken.objects.get(proposal_version=self.proposal)
+        self.assertEqual(token.email_subject, 'Please review revised commercial proposal')
+        self.assertIn('Dear Buyer', token.email_body)
+        self.assertIn('[secure-token-redacted]', token.email_body)
+        raw_token = re.search(r'token=([^\s]+)', mail.outbox[-1].body).group(1)
+        self.assertNotIn(raw_token, token.email_body)
+        self.assertEqual(resp.data['email_subject'], token.email_subject)
+        self.assertEqual(resp.data['email_body'], token.email_body)
+
+    def test_send_to_client_accepts_legacy_note_as_email_body(self):
+        resp = self.client.post(
+            f'{PROPOSALS_URL}{self.proposal.pk}/send-to-client/',
+            {
+                'recipient_email': 'buyer@acme.com',
+                'note': 'This is the commercial note from sales.',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIn('This is the commercial note from sales.', mail.outbox[-1].body)
+
+    def test_send_to_client_rejects_multiline_subject(self):
+        resp = self.client.post(
+            f'{PROPOSALS_URL}{self.proposal.pk}/send-to-client/',
+            {
+                'recipient_email': 'buyer@acme.com',
+                'email_subject': 'Line one\nLine two',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('email_subject', resp.data['detail'])
 
 
 @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')

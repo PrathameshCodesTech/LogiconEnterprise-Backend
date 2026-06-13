@@ -113,7 +113,18 @@ class BudgetPlan(TimeStampedModel):
                 fields=['org', 'code'],
                 condition=Q(is_active=True),
                 name='unique_active_budget_code_per_org',
-            )
+            ),
+            models.UniqueConstraint(
+                fields=['org', 'department'],
+                condition=(
+                    Q(is_active=True)
+                    & Q(status='active')
+                    & Q(budget_nature='non_billable')
+                    & Q(budget_type='hiring')
+                    & Q(department__isnull=False)
+                ),
+                name='unique_active_internal_hiring_budget_per_department',
+            ),
         ]
         indexes = [
             models.Index(fields=['org', 'budget_nature', 'status']),

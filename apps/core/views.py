@@ -25,10 +25,12 @@ class MeView(generics.RetrieveAPIView):
         # Import here to avoid circular imports
         from apps.access.models import UserScopeAssignment, UserRoleAssignment
         from apps.access.serializers import UserScopeAssignmentSerializer, UserRoleAssignmentSerializer
-        from apps.access.capabilities import get_user_capabilities
+        from apps.access.capabilities import get_user_access_profile, get_user_capabilities
 
         scope_assignments = UserScopeAssignment.objects.filter(user=user).select_related('scope_node')
         role_assignments = UserRoleAssignment.objects.filter(user=user).select_related('role', 'scope_node')
+
+        access_profile = get_user_access_profile(user)
 
         return Response({
             'id': user.id,
@@ -43,6 +45,7 @@ class MeView(generics.RetrieveAPIView):
             'scope_assignments': UserScopeAssignmentSerializer(scope_assignments, many=True).data,
             'role_assignments': UserRoleAssignmentSerializer(role_assignments, many=True).data,
             'capabilities': get_user_capabilities(user),
+            **access_profile,
         })
 
 

@@ -74,7 +74,8 @@ def rank_candidates(
       {candidate, score, match_status, score_breakdown,
        matched_skills, missing_skills, extra_candidate_skills, reasons, warnings}
 
-    If save_results=True, upserts CandidateMatchResult rows.
+    If save_results=True, upserts CandidateMatchResult rows and attaches
+    match_result ids to the returned rows.
     """
     from apps.talent.models import CandidateSkill, CandidateExperience
 
@@ -138,9 +139,45 @@ def rank_candidates(
     results.sort(key=lambda r: r['score'], reverse=True)
 
     if save_results and results:
-        _save_match_results(demand, results, user)
+        saved_ids = _save_match_results(demand, results, user)
+        for result in results:
+            result['match_result'] = saved_ids.get(result['candidate'].pk)
 
     return results
+
+
+def match_result_snapshot(match_result) -> dict:
+    """Return the auditable scorecard payload used when shortlisting."""
+    if match_result is None:
+        return {}
+    score = match_result.final_score
+    if score is None:
+        score = match_result.match_score
+    breakdown = {
+        'role': match_result.role_score,
+        'skills': match_result.skill_score,
+        'experience': match_result.experience_score,
+        'location': match_result.location_score,
+        'availability': match_result.availability_score,
+        'industry': match_result.industry_score,
+        'education': match_result.education_score,
+        'salary': match_result.salary_score,
+        'semantic': match_result.semantic_score,
+    }
+    return {
+        'match_result': match_result.pk,
+        'score': float(score) if score is not None else None,
+        'match_source': match_result.match_source,
+        'score_breakdown': {
+            key: float(value) for key, value in breakdown.items()
+            if value is not None
+        },
+        'matched_skills': match_result.matched_skills or [],
+        'missing_skills': match_result.missing_skills or [],
+        'reasons': match_result.match_reason or [],
+        'warnings': match_result.warnings or [],
+        'details': match_result.match_details or {},
+    }
 
 
 # ─── Internals ────────────────────────────────────────────────────────────────
@@ -158,6 +195,7 @@ def _save_match_results(demand, results, user):
     from apps.hiring.models import CandidateMatchResult
 
     org = demand.mrf.org
+    saved_ids = {}
 
     for result in results:
         candidate = result['candidate']
@@ -192,9 +230,13 @@ def _save_match_results(demand, results, user):
             for k, v in defaults.items():
                 setattr(existing, k, v)
             existing.save(update_fields=list(defaults.keys()))
+            saved_ids[candidate.pk] = existing.pk
         else:
-            CandidateMatchResult.objects.create(
+            created = CandidateMatchResult.objects.create(
                 candidate=candidate,
                 mrf_line_item=demand,
                 **defaults,
             )
+            saved_ids[candidate.pk] = created.pk
+
+    return saved_ids

@@ -102,12 +102,17 @@ class BudgetPlanWriteSerializer(serializers.ModelSerializer):
 
         org = self.context.get('actor_org') or get('org')
         budget_nature = get('budget_nature')
+        budget_type = get('budget_type') or 'general'
         client = get('client')
         site = get('site')
         department = get('department')
         period_start = get('period_start')
         period_end = get('period_end')
         amount = get('amount')
+        status = get('status') or 'draft'
+        is_active = get('is_active')
+        if is_active is None:
+            is_active = True
 
         errors = {}
 
@@ -150,6 +155,21 @@ class BudgetPlanWriteSerializer(serializers.ModelSerializer):
                     errors['site'] = 'Non-billable budget must not have a site.'
             if not department:
                 errors['department'] = 'Non-billable budget requires a department.'
+            elif budget_type == 'hiring' and status == 'active' and is_active:
+                existing = BudgetPlan.objects.filter(
+                    org=org,
+                    department=department,
+                    budget_nature='non_billable',
+                    budget_type='hiring',
+                    status='active',
+                    is_active=True,
+                )
+                if instance is not None:
+                    existing = existing.exclude(pk=instance.pk)
+                if existing.exists():
+                    errors['department'] = (
+                        'An active internal hiring budget already exists for this department.'
+                    )
 
         if errors:
             raise serializers.ValidationError(errors)

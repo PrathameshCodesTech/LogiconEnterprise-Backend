@@ -123,7 +123,20 @@ class HiringApplication(TimeStampedModel):
         decimal_places=2,
         null=True,
         blank=True,
-        help_text='Optional AI/manual match score out of 100.',
+        help_text='Optional rules/manual match score out of 100.',
+    )
+    match_result = models.ForeignKey(
+        'hiring.CandidateMatchResult',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='shortlisted_applications',
+        help_text='Match result used when this candidate was shortlisted.',
+    )
+    match_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Snapshot of scorecard used at shortlist time.',
     )
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft')
     current_stage = models.ForeignKey(
@@ -228,7 +241,7 @@ class ApplicationStageHistory(models.Model):
 # ─── CandidateMatchResult ─────────────────────────────────────────────────────
 
 class CandidateMatchResult(models.Model):
-    """AI or manual match score between a candidate and an MRF line item."""
+    """Rules/manual match score between a candidate and an MRF line item."""
 
     MATCH_SOURCE_CHOICES = [
         ('manual', 'Manual'),

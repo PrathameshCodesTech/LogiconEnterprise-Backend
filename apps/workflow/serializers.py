@@ -438,27 +438,38 @@ def _serialize_proposed_user(pu):
 def _serialize_proposal_budget_line(line):
     return {
         'id': line.pk,
+        'site': line.site_id,
+        'site_id': line.site_id,
+        'site_name': line.site.site_name if line.site_id else None,
+        'role_requirement': line.role_requirement_id,
+        'job_role': line.job_role_id,
+        'job_role_id': line.job_role_id,
+        'job_role_name': line.job_role.name if line.job_role_id else None,
         'description': line.description,
         'service_category': line.service_category or '',
         'manpower_count': line.manpower_count,
         'unit_cost': str(line.unit_cost),
         'total_cost': str(line.total_cost),
         'sort_order': line.sort_order,
-        'site_id': line.site_id,
-        'job_role_id': line.job_role_id,
+        'is_manual_override': line.is_manual_override,
     }
 
 
 def _serialize_proposal_breakup_line(line):
     return {
         'id': line.pk,
+        'site': line.site_id,
+        'site_id': line.site_id,
+        'site_name': line.site.site_name if line.site_id else None,
+        'role_requirement': line.role_requirement_id,
+        'job_role': line.job_role_id,
+        'job_role_id': line.job_role_id,
+        'job_role_name': line.job_role.name if line.job_role_id else None,
         'component_name': line.component_name,
         'component_type': line.component_type,
         'percentage': str(line.percentage) if line.percentage is not None else None,
         'amount': str(line.amount),
         'sort_order': line.sort_order,
-        'site_id': line.site_id,
-        'job_role_id': line.job_role_id,
     }
 
 

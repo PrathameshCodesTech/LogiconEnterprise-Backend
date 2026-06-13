@@ -15,6 +15,7 @@ from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.sales.models import SalesLead, SalesLeadSite, SiteSurvey, SalesRoleRequirement, ProposalVersion
+from apps.sales.proposal_calculation import seed_default_proposal_component_rules
 from apps.sales.services import generate_proposal_version, submit_to_operations
 from apps.workflow.exceptions import WorkflowConfigurationError
 from apps.workflow.models import (
@@ -26,7 +27,9 @@ from apps.workflow.tests.helpers import bootstrap_legacy_workflow
 
 
 def _org(code):
-    return Organization.objects.create(name=f'Org {code}', code=code)
+    org = Organization.objects.create(name=f'Org {code}', code=code)
+    seed_default_proposal_component_rules(org=org)
+    return org
 
 
 def _node(org):
@@ -253,6 +256,14 @@ class TestSalesProposalMyTasks(TestCase):
         self.assertIn('budget_lines', resp.data['target'])
         self.assertIn('breakup_lines', resp.data['target'])
         self.assertIn('sales_proposal', resp.data['target'])
+        budget_line = resp.data['target']['budget_lines'][0]
+        breakup_line = resp.data['target']['breakup_lines'][0]
+        self.assertIn('role_requirement', budget_line)
+        self.assertIn('job_role_name', budget_line)
+        self.assertIn('site_name', budget_line)
+        self.assertIn('role_requirement', breakup_line)
+        self.assertIn('job_role_name', breakup_line)
+        self.assertIn('site_name', breakup_line)
 
 
 class TestSeedSalesProposalWorkflowDemo(TestCase):

@@ -162,20 +162,24 @@ def check_mrf_readiness(mrf):
                 budget_nature_valid = False
 
     else:  # non_billable
+        if not mrf.requesting_department_id:
+            errors.append('Non-billable MRF requires a requesting department.')
+        if not mrf.required_department_id:
+            errors.append('Non-billable MRF requires a required department.')
         if mrf.budget_plan_id:
             bp = mrf.budget_plan
             if bp.budget_nature != 'non_billable':
                 errors.append('Non-billable MRF requires a non-billable budget plan.')
                 budget_nature_valid = False
-            elif bp.department_id:
-                dept_ids = [
-                    d for d in [mrf.requesting_department_id, mrf.required_department_id] if d
-                ]
-                if bp.department_id not in dept_ids:
-                    errors.append(
-                        'Budget plan is department-scoped but does not match '
-                        'the requesting or required department of this MRF.'
-                    )
+            elif bp.budget_type != 'hiring':
+                errors.append('Non-billable MRF requires an internal hiring budget plan.')
+                budget_nature_valid = False
+            elif not bp.department_id:
+                errors.append('Non-billable budget plan must be department-scoped.')
+            elif bp.department_id != mrf.required_department_id:
+                errors.append(
+                    'Budget plan department does not match the required department of this MRF.'
+                )
 
     # ── Budget resolution & check ──────────────────────────────────────────────
     if mrf.billing_type == 'billable' and budget_nature_valid:
@@ -241,21 +245,58 @@ def check_mrf_readiness(mrf):
                 'available_after_request': None,
             }
 
-    elif mrf.budget_plan_id and budget_nature_valid:
-        # Non-billable with explicit budget plan
+    elif mrf.billing_type == 'non_billable' and budget_nature_valid:
+        from apps.budgets.services import (
+            resolve_non_billable_budget_plan_for_mrf,
+            _budget_plan_scope,
+        )
+
+        if mrf.budget_plan_id:
+            resolved_plan = mrf.budget_plan
+            plan_scope = 'explicit'
+        else:
+            try:
+                resolved_plan = resolve_non_billable_budget_plan_for_mrf(mrf)
+                plan_scope = _budget_plan_scope(resolved_plan)
+            except BudgetReservationError as exc:
+                errors.append(str(exc))
+                resolved_plan = None
+                plan_scope = 'none'
+
+        if resolved_plan is None:
+            budget_summary = {
+                'ok': False,
+                'sufficient': False,
+                'plan_id': None,
+                'plan_name': None,
+                'plan_code': None,
+                'scope': plan_scope,
+                'total_amount': None,
+                'available_amount': None,
+                'requested_amount': None,
+                'available_after_request': None,
+            }
+            return {
+                'ok': len(errors) == 0,
+                'errors': errors,
+                'warnings': warnings,
+                'billable_headcount': billable_headcount,
+                'budget': budget_summary,
+            }
+
         try:
-            required = calculate_mrf_reservation_amount(mrf, mrf.budget_plan)
-            totals = get_budget_plan_totals(mrf.budget_plan)
+            required = calculate_mrf_reservation_amount(mrf, resolved_plan)
+            totals = get_budget_plan_totals(resolved_plan)
             available_amount = totals['available_amount']
             available_after = max(Decimal('0.00'), available_amount - required)
             sufficient = required <= available_amount
             budget_summary = {
                 'ok': sufficient,
                 'sufficient': sufficient,
-                'plan_id': mrf.budget_plan_id,
-                'plan_name': mrf.budget_plan.name,
-                'plan_code': mrf.budget_plan.code,
-                'scope': 'explicit',
+                'plan_id': resolved_plan.pk,
+                'plan_name': resolved_plan.name,
+                'plan_code': resolved_plan.code,
+                'scope': plan_scope,
                 'total_amount': totals['total_amount'],
                 'available_amount': available_amount,
                 'requested_amount': required,
@@ -290,6 +331,7 @@ def get_resolved_budget_context(mrf):
     """
     from apps.budgets.services import (
         resolve_budget_plan_for_mrf,
+        resolve_non_billable_budget_plan_for_mrf,
         get_budget_plan_totals,
         calculate_mrf_reservation_amount,
         _budget_plan_scope,
@@ -321,6 +363,13 @@ def get_resolved_budget_context(mrf):
     elif mrf.billing_type == 'billable':
         try:
             plan = resolve_budget_plan_for_mrf(mrf)
+            scope = _budget_plan_scope(plan)
+        except BudgetReservationError:
+            mrf._resolved_budget_ctx = _NONE
+            return _NONE
+    elif mrf.billing_type == 'non_billable':
+        try:
+            plan = resolve_non_billable_budget_plan_for_mrf(mrf)
             scope = _budget_plan_scope(plan)
         except BudgetReservationError:
             mrf._resolved_budget_ctx = _NONE

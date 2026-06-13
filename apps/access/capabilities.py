@@ -197,6 +197,7 @@ SALES_PROPOSAL_SEND_TO_CLIENT = "sales_proposal.send_to_client"
 # Sales Survey
 SALES_SURVEY_READ = "sales_survey.read"
 SALES_SURVEY_UPDATE = "sales_survey.update"
+SALES_SURVEY_ASSIGN = "sales_survey.assign"
 
 # ─── All capabilities list ─────────────────────────────────────────────────────
 ALL_CAPABILITIES = [
@@ -232,7 +233,7 @@ ALL_CAPABILITIES = [
     SALES_LEAD_READ, SALES_LEAD_CREATE, SALES_LEAD_UPDATE, SALES_LEAD_DELETE,
     SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE, SALES_PROPOSAL_UPDATE,
     SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
-    SALES_SURVEY_READ, SALES_SURVEY_UPDATE,
+    SALES_SURVEY_READ, SALES_SURVEY_UPDATE, SALES_SURVEY_ASSIGN,
 ]
 
 # ─── Default role permission presets used by seed commands. ──────────────────
@@ -397,25 +398,15 @@ ROLE_CAPABILITIES = {
     'sales_manager': [
         CLIENT_READ, CLIENT_CREATE, CLIENT_UPDATE,
         SITE_READ, SITE_CREATE, SITE_UPDATE,
-        SITE_ROLE_REQ_READ, SITE_ROLE_REQ_CREATE, SITE_ROLE_REQ_UPDATE,
         JOB_ROLE_READ,
-        DEPARTMENT_READ,
-        USER_READ,
-        CAMPAIGN_READ, CAMPAIGN_CREATE,
-        SUBMISSION_READ,
-        CANDIDATE_READ,
-        MRF_READ, MRF_CREATE,
-        WORKFLOW_READ, WORKFLOW_START,
-        WORKFLOW_CONFIG_READ,
-        CLIENT_ONBOARDING_READ, CLIENT_ONBOARDING_CREATE, CLIENT_ONBOARDING_UPDATE,
         MOBILISATION_READ, MOBILISATION_CREATE, MOBILISATION_UPDATE,
         WAGE_READ,
         BUDGET_READ,
         REPORT_READ, REPORT_EXPORT,
         SALES_LEAD_READ, SALES_LEAD_CREATE, SALES_LEAD_UPDATE, SALES_LEAD_DELETE,
         SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE, SALES_PROPOSAL_UPDATE,
-        SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
-        SALES_SURVEY_READ, SALES_SURVEY_UPDATE,
+        SALES_PROPOSAL_SEND_TO_CLIENT,
+        SALES_SURVEY_READ,
     ],
 
     # Sales Executive — creates clients/sites/campaigns, raises MRF, creates onboarding requests, manages sales leads
@@ -462,7 +453,7 @@ ROLE_CAPABILITIES = {
         FIELD_TRACKING_READ,
         REPORT_READ,
         SALES_LEAD_READ,
-        SALES_SURVEY_READ, SALES_SURVEY_UPDATE,
+    SALES_SURVEY_READ, SALES_SURVEY_UPDATE, SALES_SURVEY_ASSIGN,
         SALES_PROPOSAL_READ,
     ],
 
@@ -492,7 +483,7 @@ ROLE_CAPABILITIES = {
         FIELD_TRACKING_READ,
         REPORT_READ, REPORT_EXPORT,
         SALES_LEAD_READ,
-        SALES_SURVEY_READ, SALES_SURVEY_UPDATE,
+        SALES_SURVEY_READ, SALES_SURVEY_UPDATE, SALES_SURVEY_ASSIGN,
         SALES_PROPOSAL_READ, SALES_PROPOSAL_APPROVE,
     ],
 
@@ -593,6 +584,23 @@ CLIENT_FACING_ROLE_CODES = frozenset({
     'client_user',
 })
 
+ROLE_NAV_PERSONAS = {
+    'admin': 'admin',
+    'sales_manager': 'sales',
+    'sales_executive': 'sales',
+    'operations_manager': 'operations',
+    'operations_executive': 'operations',
+    'site_manager': 'operations',
+    'field_supervisor': 'operations',
+    'finance': 'finance',
+    'finance_executive': 'finance',
+    'finance_manager': 'finance',
+    'hr_admin': 'hr',
+    'hr_executive': 'hr',
+    'hr_manager': 'hr',
+    'hod': 'operations',
+}
+
 
 def is_client_facing_user(user) -> bool:
     """
@@ -613,6 +621,80 @@ def is_client_facing_user(user) -> bool:
     if not role_codes:
         return False
     return role_codes.issubset(CLIENT_FACING_ROLE_CODES)
+
+
+def get_active_role_codes(user) -> list:
+    """Return sorted active role codes assigned to the user."""
+    if user.is_superuser:
+        return []
+
+    from apps.access.models import UserRoleAssignment
+
+    role_codes = (
+        UserRoleAssignment.objects
+        .filter(user=user, role__is_active=True)
+        .values_list('role__code', flat=True)
+    )
+    return sorted({code for code in role_codes if code})
+
+
+def get_user_access_profile(user) -> dict:
+    """
+    Return the backend-owned access profile consumed by UI shells.
+
+    Capabilities remain the security contract. This profile is a UX/navigation
+    contract so frontend does not duplicate role-code persona rules.
+    """
+    if user.is_superuser:
+        return {
+            'is_client_facing': False,
+            'portal_mode': 'internal',
+            'primary_role_codes': [],
+            'nav_persona': 'admin',
+        }
+
+    role_codes = get_active_role_codes(user)
+    role_code_set = set(role_codes)
+    is_client_facing = bool(role_codes) and role_code_set.issubset(CLIENT_FACING_ROLE_CODES)
+
+    if is_client_facing:
+        return {
+            'is_client_facing': True,
+            'portal_mode': 'client',
+            'primary_role_codes': role_codes,
+            'nav_persona': 'client',
+        }
+
+    personas = {
+        ROLE_NAV_PERSONAS.get(code, 'mixed')
+        for code in role_codes
+        if code not in CLIENT_FACING_ROLE_CODES
+    }
+
+    if 'admin' in personas:
+        nav_persona = 'admin'
+    elif len(personas) == 1:
+        nav_persona = next(iter(personas))
+    else:
+        nav_persona = 'mixed'
+
+    return {
+        'is_client_facing': False,
+        'portal_mode': 'internal',
+        'primary_role_codes': role_codes,
+        'nav_persona': nav_persona,
+    }
+
+
+def is_sales_persona_user(user) -> bool:
+    """Return True only for internal users whose active role set resolves to sales."""
+    if user.is_superuser:
+        return False
+    profile = get_user_access_profile(user)
+    return (
+        profile.get('portal_mode') == 'internal'
+        and profile.get('nav_persona') == 'sales'
+    )
 
 
 def get_capabilities_for_role(role_code: str) -> list:

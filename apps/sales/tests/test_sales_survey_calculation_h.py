@@ -245,7 +245,7 @@ class TestSeedIdempotency(TestCase):
         scope.save()
 
         shift = SiteSurveyShiftDeployment.objects.get(
-            survey=self.survey, description='Janitor',
+            survey=self.survey, description='Helper',
         )
         shift.general_count = Decimal('5.00')
         shift.remarks = 'custom note'
@@ -291,9 +291,9 @@ class TestSeedIdempotency(TestCase):
         scope.save()
 
         shift = SiteSurveyShiftDeployment.objects.get(
-            survey=self.survey, description='Sub Total',
+            survey=self.survey, description='Electrician',
         )
-        shift.line_type = 'item'  # hacked
+        shift.line_type = 'header'  # hacked
         shift.general_count = Decimal('7.00')
         shift.remarks = 'my note'
         shift.save()
@@ -320,7 +320,7 @@ class TestSeedIdempotency(TestCase):
         # Metadata refreshed to template values.
         self.assertEqual(scope.field_label, 'Site Name')
         self.assertEqual(scope.sort_order, 1)
-        self.assertEqual(shift.line_type, 'subtotal')
+        self.assertEqual(shift.line_type, 'item')
         # User-entered values preserved.
         self.assertEqual(scope.value_text, 'My Site Value')
         self.assertEqual(shift.general_count, Decimal('7.00'))
@@ -454,6 +454,44 @@ class TestSurveyChildScoping(TestCase):
 
 
 # ─── Group 5: equipment totals auto-compute ───────────────────────────────────
+
+    def test_shift_deployment_api_calculates_total_and_defaults_description_from_role(self):
+        role = JobRole.objects.create(
+            org=self.org_a,
+            name='Lift Operator',
+            code='lift_operator',
+            skill_category='skilled',
+            is_active=True,
+        )
+        r = self.api.post(
+            '/api/sales/site-survey-shift-deployments/',
+            data={
+                'survey': self.survey_a.pk,
+                'job_role': role.pk,
+                'general_count': '1.00',
+                'first_shift_count': '2.00',
+                'second_shift_count': '3.00',
+                'night_shift_count': '4.00',
+                'total_count': '999.00',
+                'line_type': 'item',
+                'sort_order': 500,
+            },
+            format='json',
+        )
+
+        self.assertEqual(r.status_code, http_status.HTTP_201_CREATED, r.data)
+        self.assertEqual(r.data['description'], 'Lift Operator')
+        self.assertEqual(Decimal(r.data['total_count']), Decimal('10.00'))
+
+        patch = self.api.patch(
+            f"/api/sales/site-survey-shift-deployments/{r.data['id']}/",
+            data={'night_shift_count': '5.00', 'total_count': '999.00'},
+            format='json',
+        )
+
+        self.assertEqual(patch.status_code, http_status.HTTP_200_OK)
+        self.assertEqual(Decimal(patch.data['total_count']), Decimal('11.00'))
+
 
 class TestEquipmentTotals(TestCase):
 

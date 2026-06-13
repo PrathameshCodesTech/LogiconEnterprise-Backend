@@ -30,9 +30,11 @@ from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode
+from apps.jobs.models import JobRole
 from apps.talent.models import (
     Candidate, Resume, CandidateSkill,
     ParsedResume, CandidateExperience, CandidateEducation,
+    ResumeImportBatch, ResumeImportItem,
 )
 from apps.talent.resume_parser.exceptions import ManualReviewRequired
 
@@ -202,6 +204,35 @@ class TestLLMParser(TestCase):
 
 
 # ─── 3. Validation ───────────────────────────────────────────────────────────
+
+class TestDeterministicParser(TestCase):
+
+    def test_extracts_experience_and_education_entries(self):
+        from apps.talent.resume_parser.deterministic_parser import parse_resume_text
+
+        parsed = parse_resume_text(
+            """
+            Ravi Patil
+            Phone: 9876543299
+            Email: ravi@example.com
+
+            Experience
+            Electrician at Spark Facility Services Jan 2020 - Mar 2024
+
+            Education
+            ITI Electrician from Pune Industrial Training Institute 2018
+            """
+        )
+
+        self.assertEqual(parsed['current_company'], 'Spark Facility Services')
+        self.assertEqual(parsed['experience'][0]['job_title'], 'Electrician')
+        self.assertEqual(parsed['experience'][0]['company_name'], 'Spark Facility Services')
+        self.assertEqual(parsed['experience'][0]['start_date'], '2020-01')
+        self.assertEqual(parsed['experience'][0]['end_date'], '2024-03')
+        self.assertEqual(parsed['education'][0]['degree'], 'ITI')
+        self.assertIn('Pune Industrial Training Institute', parsed['education'][0]['institute'])
+        self.assertEqual(parsed['education'][0]['end_year'], 2018)
+
 
 class TestValidation(TestCase):
 
@@ -496,15 +527,15 @@ class TestOrchestration(TestCase):
             status='uploaded',
         )
 
-    def test_no_api_key_sets_manual_review(self):
+    def test_no_api_key_still_indexes_with_deterministic_parser(self):
         """Without OPENAI_API_KEY the pipeline stops at parsing → manual_review."""
         resume = self._make_resume()
         with patch.dict('os.environ', {'OPENAI_API_KEY': ''}, clear=False):
             from apps.talent.resume_parser.orchestration import run_pipeline
             run_pipeline(resume)
         resume.refresh_from_db()
-        self.assertEqual(resume.status, 'manual_review')
-        self.assertIn('OPENAI_API_KEY', resume.manual_review_reason)
+        self.assertEqual(resume.status, 'indexed')
+        self.assertEqual(resume.parser_engine, 'deterministic_v1')
 
     def test_short_text_sets_manual_review(self):
         """Text shorter than 50 chars → manual_review."""
@@ -518,24 +549,20 @@ class TestOrchestration(TestCase):
     def test_full_pipeline_sets_indexed(self):
         """Mock LLM → full pipeline → indexed."""
         resume = self._make_resume()
-        with patch('apps.talent.resume_parser.llm_parser.parse_resume_text',
-                   return_value=_MOCK_PARSED):
-            from apps.talent.resume_parser.orchestration import run_pipeline
-            run_pipeline(resume)
+        from apps.talent.resume_parser.orchestration import run_pipeline
+        run_pipeline(resume)
         resume.refresh_from_db()
         self.assertEqual(resume.status, 'indexed')
-        self.assertEqual(resume.parser_engine, 'openai_gpt4o_mini')
+        self.assertEqual(resume.parser_engine, 'deterministic_v1')
         self.assertTrue(ParsedResume.objects.filter(resume=resume).exists())
 
     def test_full_pipeline_creates_skills(self):
         resume = self._make_resume()
-        with patch('apps.talent.resume_parser.llm_parser.parse_resume_text',
-                   return_value=_MOCK_PARSED):
-            from apps.talent.resume_parser.orchestration import run_pipeline
-            run_pipeline(resume)
+        from apps.talent.resume_parser.orchestration import run_pipeline
+        run_pipeline(resume)
         self.assertTrue(
             CandidateSkill.objects.filter(
-                candidate=self.candidate, normalized_skill_name='patrol'
+                candidate=self.candidate, normalized_skill_name='security'
             ).exists()
         )
 
@@ -564,7 +591,7 @@ class TestOrchestration(TestCase):
         """LLM returns no name/email/phone → validation fails → manual_review."""
         empty_parsed = {**_MOCK_PARSED, 'full_name': '', 'email': '', 'phone': ''}
         resume = self._make_resume()
-        with patch('apps.talent.resume_parser.llm_parser.parse_resume_text',
+        with patch('apps.talent.resume_parser.deterministic_parser.parse_resume_text',
                    return_value=empty_parsed):
             from apps.talent.resume_parser.orchestration import run_pipeline
             run_pipeline(resume)
@@ -581,8 +608,11 @@ class TestProcessResumeTask(TestCase):
         self.candidate = _candidate(self.org, phone='9876543212')
 
     def _resume(self, status='uploaded', file_hash=''):
-        f = SimpleUploadedFile('cv.txt', b'John Doe security guard ten years experience Mumbai',
-                               content_type='text/plain')
+        f = SimpleUploadedFile(
+            'cv.txt',
+            b'John Doe\nSecurity guard with ten years experience in Mumbai site operations',
+            content_type='text/plain',
+        )
         return Resume.objects.create(
             candidate=self.candidate, file=f,
             original_filename='cv.txt', content_type='text/plain',
@@ -603,7 +633,7 @@ class TestProcessResumeTask(TestCase):
             from apps.talent.tasks import process_resume_task
             process_resume_task(resume.pk, force=True)
         resume.refresh_from_db()
-        self.assertEqual(resume.status, 'manual_review')
+        self.assertEqual(resume.status, 'indexed')
 
     def test_duplicate_file_skipped_always(self):
         resume = self._resume(status='duplicate_file')
@@ -616,12 +646,10 @@ class TestProcessResumeTask(TestCase):
         from apps.talent.tasks import process_resume_task
         process_resume_task(99999)
 
-    def test_task_full_pipeline_with_mocked_llm(self):
+    def test_task_full_pipeline_with_deterministic_parser(self):
         resume = self._resume()
-        with patch('apps.talent.resume_parser.llm_parser.parse_resume_text',
-                   return_value=_MOCK_PARSED):
-            from apps.talent.tasks import process_resume_task
-            process_resume_task(resume.pk)
+        from apps.talent.tasks import process_resume_task
+        process_resume_task(resume.pk)
         resume.refresh_from_db()
         self.assertEqual(resume.status, 'indexed')
 
@@ -687,7 +715,7 @@ class TestResumeViewSetActions(TestCase):
         self.user = _user('u_rp_api', self.org)
         _grant_resume_caps(
             self.user, self.org, self.scope,
-            [RESUME_READ, RESUME_UPLOAD, CANDIDATE_UPDATE],
+            [RESUME_READ, RESUME_UPLOAD, CANDIDATE_READ, CANDIDATE_UPDATE],
         )
         f = SimpleUploadedFile('cv.txt', b'test', content_type='text/plain')
         self.resume = Resume.objects.create(
@@ -746,6 +774,130 @@ class TestResumeViewSetActions(TestCase):
         Resume.objects.filter(pk=self.resume.pk).update(status='failed')
         resp = self.client.post(f'/api/talent/resumes/{self.resume.pk}/mark-reviewed/')
         self.assertEqual(resp.status_code, 400)
+
+    def test_bulk_upload_creates_async_batch_and_item_task_tags_role(self):
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Electrician',
+            code='electrician-rp',
+            skill_category='skilled',
+        )
+        f = SimpleUploadedFile(
+            'electrician.txt',
+            (
+                b'Ramesh Patil\n'
+                b'Phone: 9876543219\n'
+                b'Electrician with 6 years experience in Pune maintenance operations'
+            ),
+            content_type='text/plain',
+        )
+
+        with patch('apps.talent.tasks.process_resume_import_item_task.delay') as mock_delay:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self.client.post(
+                    '/api/talent/resumes/bulk-upload/',
+                    {
+                        'target_job_role': role.pk,
+                        'source_type': 'bulk_upload',
+                        'files': [f],
+                    },
+                    format='multipart',
+                )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['status'], 'queued')
+        self.assertEqual(resp.data['total_count'], 1)
+        self.assertEqual(resp.data['processed_count'], 0)
+        batch = ResumeImportBatch.objects.get(pk=resp.data['id'])
+        item = ResumeImportItem.objects.get(batch=batch)
+        self.assertEqual(item.document_type, 'txt')
+        mock_delay.assert_called_once_with(item.pk)
+
+        from apps.talent.tasks import process_resume_import_item_task
+        process_resume_import_item_task(item.pk)
+
+        candidate = Candidate.objects.get(phone_normalized='9876543219')
+        self.assertEqual(candidate.target_job_role_id, role.pk)
+        resume = Resume.objects.get(candidate=candidate)
+        self.assertEqual(resume.target_job_role_id, role.pk)
+        self.assertEqual(resume.document_type, 'txt')
+        self.assertEqual(resume.parser_engine, 'deterministic_v1')
+        self.assertEqual(resume.status, 'indexed')
+        item.refresh_from_db()
+        batch.refresh_from_db()
+        self.assertEqual(item.status, 'indexed')
+        self.assertEqual(batch.status, 'completed')
+        self.assertEqual(batch.success_count, 1)
+
+        detail = self.client.get(f'/api/talent/resumes/import-batches/{batch.pk}/')
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data['processed_count'], 1)
+
+        source_filtered = self.client.get(
+            '/api/talent/candidates/',
+            {'source_type': 'bulk_upload'},
+        )
+        self.assertEqual(source_filtered.status_code, 200, source_filtered.data)
+        results = source_filtered.data.get('results', source_filtered.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['id'], candidate.pk)
+
+    def test_excel_import_csv_tags_candidate_to_role(self):
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Plumber',
+            code='plumber-rp',
+            skill_category='skilled',
+        )
+        csv_file = SimpleUploadedFile(
+            'candidates.csv',
+            (
+                b'full_name,phone,email,skills\n'
+                b'Ganesh More,9876543220,ganesh@example.com,Plumbing;Maintenance\n'
+            ),
+            content_type='text/csv',
+        )
+
+        resp = self.client.post(
+            '/api/talent/resumes/excel-import/',
+            {
+                'target_job_role': role.pk,
+                'source_type': 'excel_import',
+                'file': csv_file,
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['imported'], 1)
+        self.assertEqual(resp.data['document_type'], 'csv')
+        candidate = Candidate.objects.get(phone_normalized='9876543220')
+        self.assertEqual(candidate.target_job_role_id, role.pk)
+        self.assertEqual(candidate.skills.count(), 2)
+        batch = ResumeImportBatch.objects.get(pk=resp.data['batch_id'])
+        self.assertEqual(batch.document_type, 'csv')
+        self.assertTrue(batch.import_file.name.endswith('.csv'))
+        item = ResumeImportItem.objects.get(batch=batch)
+        self.assertEqual(item.document_type, 'csv')
+        self.assertEqual(item.row_number, 2)
+        self.assertEqual(item.candidate_id, candidate.pk)
+
+        filtered = self.client.get('/api/talent/candidates/', {'document_type': 'csv'})
+        self.assertEqual(filtered.status_code, 200, filtered.data)
+        results = filtered.data.get('results', filtered.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['id'], candidate.pk)
+        self.assertEqual(results[0]['latest_document_type'], 'csv')
+        self.assertEqual(results[0]['latest_source_type'], 'excel_import')
+
+        source_filtered = self.client.get(
+            '/api/talent/candidates/',
+            {'source_type': 'excel_import'},
+        )
+        self.assertEqual(source_filtered.status_code, 200, source_filtered.data)
+        results = source_filtered.data.get('results', source_filtered.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['id'], candidate.pk)
 
 
 # ─── 10. intake _link_resume_if_needed ───────────────────────────────────────

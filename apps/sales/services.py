@@ -12,11 +12,52 @@ from apps.sales.activity import log_sales_activity
 
 # ─── Lead Transition Services ─────────────────────────────────────────────────
 
+def get_operations_department(org):
+    """Return the org-level Operations department used for survey ownership."""
+    from apps.core.models import Department
+
+    return (
+        Department.objects
+        .filter(
+            org=org,
+            code__iexact='operations',
+            client__isnull=True,
+            site__isnull=True,
+            is_active=True,
+        )
+        .first()
+    )
+
+
+def validate_operations_survey_owner(org, user):
+    """
+    Survey owners must be active internal users in the org-level Operations
+    department. Do not fall back to all internal users.
+    """
+    operations_department = get_operations_department(org)
+    if operations_department is None:
+        raise ValueError(
+            'Operations department is not configured for this organization. '
+            'Create an active org-level department with code "operations".'
+        )
+    if user.org_id != org.id:
+        raise ValueError('Operations owner not found in this org.')
+    if user.user_type != 'internal' or not user.is_active:
+        raise ValueError('Operations owner must be an active internal user.')
+    if user.department_id != operations_department.id:
+        raise ValueError(
+            'Operations owner must be assigned to the org-level Operations department.'
+        )
+    return user
+
+
 def submit_to_operations(lead, user, operations_owner=None):
     """Sales submits lead to operations; creates pending SiteSurvey per active site."""
     if lead.current_stage != 'draft':
         raise ValueError(f"Cannot submit from stage '{lead.current_stage}'.")
     from apps.sales.models import SalesLeadSite, SiteSurvey
+    if operations_owner is not None:
+        validate_operations_survey_owner(lead.org, operations_owner)
     now = timezone.now()
     update_fields = ['current_stage', 'current_status', 'submitted_to_operations_at',
                      'submitted_to_operations_by', 'updated_at']
@@ -76,6 +117,7 @@ def submit_to_operations(lead, user, operations_owner=None):
 
 def assign_survey_owner(survey, assigned_to, actor):
     """Operations assigns a survey to a team member."""
+    validate_operations_survey_owner(survey.lead.org, assigned_to)
     survey.assigned_to = assigned_to
     survey.assigned_at = timezone.now()
     survey.save(update_fields=['assigned_to', 'assigned_at', 'updated_at'])
@@ -133,6 +175,8 @@ def mark_survey_started(survey, actor):
 
 def mark_survey_completed(survey, actor):
     """Mark an individual survey completed; advances lead stage when all surveys done."""
+    _validate_survey_can_be_completed(survey)
+
     survey.status = 'completed'
     survey.completed_at = timezone.now()
     survey.save(update_fields=['status', 'completed_at', 'updated_at'])
@@ -173,6 +217,79 @@ def mark_survey_completed(survey, actor):
     return survey
 
 
+def _validate_survey_can_be_completed(survey):
+    """
+    A survey is complete only after operations has converted applicable
+    deployment/headcount rows into proposal-ready role requirements.
+    """
+    from apps.sales.models import SalesRoleRequirement, SiteSurveyShiftDeployment
+
+    generated_count = SalesRoleRequirement.objects.filter(
+        lead=survey.lead,
+        site=survey.site,
+        survey=survey,
+        is_active=True,
+        created_from_survey=True,
+    ).count()
+    if generated_count <= 0:
+        raise ValueError(
+            'Generate role requirements before marking the survey as completed.'
+        )
+
+    org = survey.lead.org
+    rows = SiteSurveyShiftDeployment.objects.select_related('job_role').filter(
+        survey=survey,
+        line_type='item',
+        is_applicable=True,
+    ).order_by('sort_order', 'id')
+
+    missing = []
+    outdated = []
+    for row in rows:
+        normalized = _normalize_role_description(row.description)
+        if not normalized:
+            continue
+        if normalized in SURVEY_ROLE_DENYLIST_DESCRIPTIONS:
+            continue
+        if _headcount_for_shift_row(row) <= 0:
+            continue
+        mapping, _reason = _resolve_survey_role_defaults(org, row)
+        if mapping is None:
+            missing.append(row.description)
+            continue
+        exists = SalesRoleRequirement.objects.filter(
+            lead=survey.lead,
+            site=survey.site,
+            survey=survey,
+            job_role=mapping.job_role,
+            is_active=True,
+            created_from_survey=True,
+        ).first()
+        if not exists:
+            missing.append(row.description)
+        elif _role_requirement_needs_sync(exists, survey, mapping, _headcount_for_shift_row(row)):
+            outdated.append(row.description)
+
+    if missing:
+        preview = ', '.join(missing[:5])
+        suffix = f' Missing rows: {preview}.'
+        if len(missing) > 5:
+            suffix = f' Missing rows: {preview}, +{len(missing) - 5} more.'
+        raise ValueError(
+            'Generate role requirements for every applicable deployment row before completion.'
+            + suffix
+        )
+    if outdated:
+        preview = ', '.join(outdated[:5])
+        suffix = f' Outdated rows: {preview}.'
+        if len(outdated) > 5:
+            suffix = f' Outdated rows: {preview}, +{len(outdated) - 5} more.'
+        raise ValueError(
+            'Regenerate role requirements before marking the survey as completed.'
+            + suffix
+        )
+
+
 def mark_survey_in_progress(lead, user):
     """Backward-compat: mark lead as survey in progress (also starts any pending surveys)."""
     if lead.current_stage != 'submitted_to_operations':
@@ -188,10 +305,13 @@ def complete_site_survey(lead, user):
     """Backward-compat: complete all surveys for a lead."""
     if lead.current_stage not in ('submitted_to_operations', 'site_survey_in_progress'):
         raise ValueError(f"Cannot complete survey from stage '{lead.current_stage}'.")
+    pending_surveys = list(lead.surveys.filter(status__in=('pending', 'in_progress')))
+    for survey in pending_surveys:
+        _validate_survey_can_be_completed(survey)
     now = timezone.now()
     lead.current_stage = 'site_survey_completed'
     lead.save(update_fields=['current_stage', 'updated_at'])
-    lead.surveys.filter(status__in=('pending', 'in_progress')).update(
+    lead.surveys.filter(pk__in=[survey.pk for survey in pending_surveys]).update(
         status='completed', completed_at=now,
     )
     return lead
@@ -233,6 +353,8 @@ def submit_proposal_for_internal_approval(proposal, user, approval_route=None):
     from apps.workflow.exceptions import WorkflowConfigurationError
     from apps.workflow.services import start_sales_proposal_workflow
 
+    _assert_proposal_breakup_lines_mapped(proposal)
+
     try:
         start_sales_proposal_workflow(proposal, user, approval_route=approval_route)
     except WorkflowConfigurationError as exc:
@@ -253,6 +375,7 @@ def mark_proposal_internally_approved(proposal, user):
     """Internal approver marks proposal approved."""
     if proposal.status != 'submitted_internal':
         raise ValueError(f"Cannot approve from proposal status '{proposal.status}'.")
+    _assert_proposal_breakup_lines_mapped(proposal)
     now = timezone.now()
     proposal.status = 'internally_approved'
     proposal.internal_approval_status = 'approved'
@@ -271,6 +394,17 @@ def _assert_proposal_internally_approved_for_client_send(proposal):
         )
 
 
+def _assert_proposal_breakup_lines_mapped(proposal):
+    if not proposal.breakup_lines.exists():
+        raise ValueError('Proposal has no salary breakup lines. Regenerate the proposal before continuing.')
+    missing_count = proposal.breakup_lines.filter(role_requirement__isnull=True).count()
+    if missing_count:
+        raise ValueError(
+            'Salary breakup is missing role mapping. '
+            'Regenerate this proposal so every salary component is linked to a role requirement.'
+        )
+
+
 def _revoke_active_client_tokens(proposal):
     from apps.sales.models import SalesProposalClientToken
     SalesProposalClientToken.objects.filter(
@@ -278,6 +412,14 @@ def _revoke_active_client_tokens(proposal):
         is_revoked=False,
         used_at__isnull=True,
     ).update(is_revoked=True)
+
+
+def _redact_client_proposal_token(email_body, raw_token):
+    if not email_body:
+        return ''
+    if not raw_token:
+        return str(email_body)
+    return str(email_body).replace(str(raw_token), '[secure-token-redacted]')
 
 
 @transaction.atomic
@@ -293,6 +435,7 @@ def create_client_proposal_token(proposal, recipient_email, actor, expires_days=
     from apps.sales.token_utils import generate_raw_client_proposal_token, hash_client_proposal_token
 
     _assert_proposal_internally_approved_for_client_send(proposal)
+    _assert_proposal_breakup_lines_mapped(proposal)
     if not recipient_email:
         raise ValueError('recipient_email is required.')
 
@@ -365,6 +508,8 @@ def send_proposal_to_client(
     recipient_email=None,
     recipient_name=None,
     expires_days=7,
+    email_subject='',
+    email_body='',
 ):
     """
     Email a secure client response link and mark the proposal as sent.
@@ -396,17 +541,23 @@ def send_proposal_to_client(
         token_record.save(update_fields=['recipient_name'])
 
     try:
-        send_proposal_client_link_email(
+        email_result = send_proposal_client_link_email(
             proposal=proposal,
             recipient_email=email,
             recipient_name=name,
             raw_token=raw_token,
             expires_at=token_record.expires_at,
+            email_subject=email_subject,
+            email_body=email_body,
         )
     except Exception as exc:
         token_record.is_revoked = True
         token_record.save(update_fields=['is_revoked'])
         raise ValueError(f'Failed to send proposal email: {exc}') from exc
+
+    token_record.email_subject = email_result['subject']
+    token_record.email_body = _redact_client_proposal_token(email_result['body'], raw_token)
+    token_record.save(update_fields=['email_subject', 'email_body'])
 
     now = timezone.now()
     proposal.status = 'sent_to_client'
@@ -439,13 +590,20 @@ def send_proposal_to_client(
         title=f'Proposal v{proposal.version_number} sent to client',
         actor=actor,
         proposal_version=proposal,
-        metadata={'recipient_email': email, 'proposal_version_id': proposal.pk},
+        metadata={
+            'recipient_email': email,
+            'proposal_version_id': proposal.pk,
+            'email_subject': token_record.email_subject,
+            'email_body': token_record.email_body,
+        },
     )
     return {
         'proposal': proposal,
         'token_expires_at': token_record.expires_at,
         'email_sent': True,
         'recipient_email': email,
+        'email_subject': token_record.email_subject,
+        'email_body': token_record.email_body,
     }
 
 
@@ -892,6 +1050,7 @@ def _create_client_from_lead(lead, actor, proposal=None):
         contact_email=lead.client_email or '',
         contact_phone=lead.client_phone or '',
         created_by=actor,
+        owner_sales_user=lead.sales_person or actor,
         is_active=True,
         source_type='sales_conversion',
         source_sales_lead=lead,
@@ -1412,8 +1571,55 @@ def _resolve_survey_role_mapping(org, description):
     ).first()
 
 
+def _resolve_survey_role_defaults(org, row):
+    """
+    Resolve proposal-ready role defaults for a survey deployment row.
+
+    Structured rows created from a JobRole do not need a description mapping.
+    They still require a configured WageCategory matching the role's
+    skill_category; otherwise generation fails with a clear reason.
+    """
+    if row.job_role_id:
+        from types import SimpleNamespace
+        from apps.sales.models import SurveyRoleMapping
+        from apps.wages.models import WageCategory
+
+        job_role = row.job_role
+        if job_role is None or job_role.org_id != org.id or not job_role.is_active:
+            return None, 'job_role_not_available'
+
+        mapping = SurveyRoleMapping.objects.select_related(
+            'job_role', 'wage_category',
+        ).filter(
+            org=org,
+            job_role=job_role,
+            is_active=True,
+        ).first()
+        if mapping is not None:
+            return mapping, None
+
+        wage_category = WageCategory.objects.filter(
+            code=job_role.skill_category,
+        ).first()
+        if wage_category is None:
+            return None, 'wage_category_not_found'
+
+        return SimpleNamespace(
+            job_role=job_role,
+            wage_category=wage_category,
+            service_category='',
+            shift_hours=None,
+            working_days=None,
+        ), None
+
+    mapping = _resolve_survey_role_mapping(org, row.description)
+    if mapping is None:
+        return None, 'role_mapping_not_found'
+    return mapping, None
+
+
 def _headcount_for_shift_row(row):
-    """Prefer total_count; fall back to general + first_shift + second_shift."""
+    """Prefer total_count; fall back to the sum of all shift buckets."""
     total = int(row.total_count or 0)
     if total > 0:
         return total
@@ -1421,8 +1627,47 @@ def _headcount_for_shift_row(row):
         int(row.general_count or 0)
         + int(row.first_shift_count or 0)
         + int(row.second_shift_count or 0)
+        + int(getattr(row, 'night_shift_count', 0) or 0)
     )
     return sum_shifts
+
+
+def _role_requirement_needs_sync(role_requirement, survey, mapping, headcount):
+    return any((
+        role_requirement.lead_id != survey.lead_id,
+        role_requirement.site_id != survey.site_id,
+        role_requirement.survey_id != survey.id,
+        role_requirement.wage_category_id != mapping.wage_category_id,
+        (role_requirement.service_category or '') != (mapping.service_category or ''),
+        role_requirement.manpower_count != headcount,
+        role_requirement.shift_hours != mapping.shift_hours,
+        role_requirement.working_days != mapping.working_days,
+        role_requirement.is_active is not True,
+        role_requirement.created_from_survey is not True,
+    ))
+
+
+def _sync_generated_role_requirement(role_requirement, survey, mapping, headcount):
+    role_requirement.site = survey.site
+    role_requirement.wage_category = mapping.wage_category
+    role_requirement.service_category = mapping.service_category
+    role_requirement.manpower_count = headcount
+    role_requirement.shift_hours = mapping.shift_hours
+    role_requirement.working_days = mapping.working_days
+    role_requirement.is_active = True
+    role_requirement.created_from_survey = True
+    role_requirement.save(update_fields=[
+        'site',
+        'wage_category',
+        'service_category',
+        'manpower_count',
+        'shift_hours',
+        'working_days',
+        'is_active',
+        'created_from_survey',
+        'updated_at',
+    ])
+    return role_requirement
 
 
 @transaction.atomic
@@ -1431,22 +1676,24 @@ def generate_role_requirements_from_survey(survey, actor):
     Convert SiteSurveyShiftDeployment manpower rows into SalesRoleRequirement
     rows for the survey's lead and site.
 
-    Returns: {'created': [...], 'skipped': [...], 'errors': [...]}.
+    Returns: {'created': [...], 'updated': [...], 'skipped': [...], 'errors': [...]}.
 
     Each created entry is a dict with sales_role_requirement_id, description,
     job_role_id, manpower_count. Skipped entries include a 'reason' string.
     Errors entries include a 'reason' string and the offending description.
 
-    Idempotent: rerunning with the same survey state leaves all already-created
-    rows in `skipped` with reason 'already_exists'.
+    Idempotent: rerunning with the same survey state leaves unchanged rows in
+    `skipped` with reason 'already_exists'. If deployment values changed, the
+    generated requirement is updated to match the current survey row.
     """
     from apps.sales.models import SalesRoleRequirement, SiteSurveyShiftDeployment
 
     created = []
+    updated = []
     skipped = []
     errors = []
 
-    rows = SiteSurveyShiftDeployment.objects.filter(
+    rows = SiteSurveyShiftDeployment.objects.select_related('job_role').filter(
         survey=survey, line_type='item',
     ).order_by('sort_order', 'id')
 
@@ -1475,11 +1722,11 @@ def generate_role_requirements_from_survey(survey, actor):
             })
             continue
 
-        mapping = _resolve_survey_role_mapping(org, row.description)
+        mapping, error_reason = _resolve_survey_role_defaults(org, row)
         if mapping is None:
             errors.append({
                 'description': row.description,
-                'reason': 'role_mapping_not_found',
+                'reason': error_reason,
             })
             continue
         job_role = mapping.job_role
@@ -1496,6 +1743,18 @@ def generate_role_requirements_from_survey(survey, actor):
             lead=survey.lead, survey=survey, job_role=job_role,
         ).first()
         if existing is not None:
+            if _role_requirement_needs_sync(existing, survey, mapping, headcount):
+                existing = _sync_generated_role_requirement(existing, survey, mapping, headcount)
+                updated.append({
+                    'description': row.description,
+                    'sales_role_requirement_id': existing.pk,
+                    'job_role_id': job_role.pk,
+                    'wage_category_id': existing.wage_category_id,
+                    'service_category': existing.service_category,
+                    'manpower_count': headcount,
+                    'used_mapping': True,
+                })
+                continue
             skipped.append({
                 'description': row.description,
                 'reason': 'already_exists',
@@ -1526,4 +1785,4 @@ def generate_role_requirements_from_survey(survey, actor):
             'used_mapping': True,
         })
 
-    return {'created': created, 'skipped': skipped, 'errors': errors}
+    return {'created': created, 'updated': updated, 'skipped': skipped, 'errors': errors}

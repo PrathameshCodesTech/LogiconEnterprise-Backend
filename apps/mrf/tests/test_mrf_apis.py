@@ -668,10 +668,10 @@ class TestMRFLineItemAPI(MRFTestBase):
 # ─── Budget-C: MRF budget link ────────────────────────────────────────────────
 
 def _budget_plan(org, nature='billable', client=None, site=None, department=None,
-                 code='mrf-bgt', status='active', is_active=True):
+                 code='mrf-bgt', status='active', is_active=True, budget_type='manpower'):
     return BudgetPlan.objects.create(
         org=org, name=f'Budget {code}', code=code,
-        budget_nature=nature, budget_type='manpower',
+        budget_nature=nature, budget_type=budget_type,
         client=client, site=site, department=department,
         period_start=date(2025, 4, 1),
         amount='1000000.00', currency='INR',
@@ -736,6 +736,7 @@ class TestMRFBudgetLink(MRFTestBase):
         budget = _budget_plan(
             self.org, nature='non_billable',
             department=self.dept_housekeeping, code='mrf-nb-dept-ok',
+            budget_type='hiring',
         )
         self._login(self.hr_admin)
         payload = self._mrf_payload(budget.pk, billing_type='non_billable')
@@ -743,6 +744,20 @@ class TestMRFBudgetLink(MRFTestBase):
         resp = self.api.post(self.MRF_URL, payload, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(resp.data['budget_plan'], budget.pk)
+
+    def test_non_billable_mrf_with_non_hiring_department_budget_rejected(self):
+        """Non-billable MRF requires an internal hiring budget, not a general department budget."""
+        budget = _budget_plan(
+            self.org, nature='non_billable',
+            department=self.dept_housekeeping, code='mrf-nb-dept-general',
+            budget_type='general',
+        )
+        self._login(self.hr_admin)
+        payload = self._mrf_payload(budget.pk, billing_type='non_billable')
+        payload['required_department'] = self.dept_housekeeping.pk
+        resp = self.api.post(self.MRF_URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('hiring budget', str(resp.data).lower())
 
     def test_billing_type_nature_mismatch_rejected(self):
         """Billable MRF with non-billable budget → 400."""

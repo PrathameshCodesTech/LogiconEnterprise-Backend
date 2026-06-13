@@ -31,3 +31,11 @@ def process_resume_task(self, resume_id: int, force: bool = False) -> None:
         return
 
     run_pipeline(resume)
+
+
+@shared_task(bind=True, max_retries=0, name='talent.process_resume_import_item')
+def process_resume_import_item_task(self, item_id: int) -> None:
+    """Process one file from a bulk resume import batch."""
+    from apps.talent.services import process_resume_import_item
+
+    process_resume_import_item(item_id)

@@ -221,9 +221,17 @@ def _generate_unique_username(email):
 def _create_proposed_user(p_user, org, client):
     from apps.accounts.models import User
     from apps.access.models import UserRoleAssignment
+    from .role_validation import validate_client_user_access_role
 
     if p_user.created_user_id is not None:
         return
+
+    try:
+        validate_client_user_access_role(p_user.access_role, p_user.scope_level)
+    except ValueError as exc:
+        raise MobilisationFinalizationError(
+            f"Cannot create client user '{p_user.email}': {exc}"
+        ) from exc
 
     email = p_user.email.strip().lower()
     username = _generate_unique_username(email)
@@ -1077,6 +1085,8 @@ def save_mobilisation_setup_builder(request, payload, actor=None):
             raise ValueError("User access_role must belong to the mobilisation organization.")
 
         scope_level = row.get('scope_level') or 'client'
+        from .role_validation import validate_client_user_access_role
+        validate_client_user_access_role(access_role, scope_level)
         real_site = None
         if scope_level == 'site':
             site_id = row.get('real_site')

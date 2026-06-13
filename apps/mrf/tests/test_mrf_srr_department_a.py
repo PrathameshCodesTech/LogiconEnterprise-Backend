@@ -33,6 +33,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
+from apps.budgets.models import BudgetPlan
 from apps.core.models import Organization, ScopeNode, Department
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
@@ -93,12 +94,13 @@ def _srr(site, job_role, department=None, wage_category=None, billing_rate=None,
     )
 
 
-def _li(mrf, job_role, srr=None, headcount=1, wage_category=None):
+def _li(mrf, job_role, srr=None, headcount=1, wage_category=None, **kwargs):
     return MRFLineItem.objects.create(
         mrf=mrf, job_role=job_role,
         site_role_requirement=srr,
         headcount=headcount,
         wage_category=wage_category,
+        **kwargs,
     )
 
 
@@ -318,9 +320,29 @@ class TestMRFReadinessDepartment(MRFSRRDeptBase):
 
     def test_m13_non_billable_mrf_without_srr_is_readiness_ok(self):
         """Non-billable MRF does not require SRR — readiness passes with no SRR."""
-        mrf = _mrf(self.org, self.site, self.hr_user, billing_type='non_billable')
-        srr = _srr(self.site, self.job_role)
-        _li(mrf, self.job_role, srr=None, headcount=3)  # deliberately no SRR
+        BudgetPlan.objects.create(
+            org=self.org,
+            name='MRF Dept A Budget',
+            code='mrfd-dept-a-budget',
+            budget_nature='non_billable',
+            budget_type='hiring',
+            department=self.dept_a,
+            period_start=datetime.date.today(),
+            amount=Decimal('100000.00'),
+            status='active',
+            is_active=True,
+        )
+        mrf = _mrf(
+            self.org, self.site, self.hr_user,
+            billing_type='non_billable',
+            required_department=self.dept_a,
+        )
+        mrf.requesting_department = self.dept_b
+        mrf.save(update_fields=['requesting_department'])
+        _li(
+            mrf, self.job_role, srr=None, headcount=3,
+            budget_max=Decimal('500.00'),
+        )  # deliberately no SRR
 
         result = check_mrf_readiness(mrf)
         self.assertTrue(result['ok'], result['errors'])

@@ -4,6 +4,8 @@ apps/sales/serializers.py
 Read/write serializers for all sales app models.
 """
 
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import (
@@ -591,16 +593,86 @@ class SiteSurveyScopeAnswerSerializer(serializers.ModelSerializer):
 
 
 class SiteSurveyShiftDeploymentSerializer(serializers.ModelSerializer):
+    description = serializers.CharField(required=False, allow_blank=True)
+    job_role_name = serializers.CharField(source='job_role.name', read_only=True)
+    job_role_code = serializers.CharField(source='job_role.code', read_only=True)
+
     class Meta:
         model = SiteSurveyShiftDeployment
         fields = [
-            'id', 'survey', 'description',
-            'general_count', 'first_shift_count', 'second_shift_count', 'total_count',
+            'id', 'survey', 'job_role', 'job_role_name', 'job_role_code', 'description',
+            'general_count', 'first_shift_count', 'second_shift_count',
+            'night_shift_count', 'total_count',
             'remarks', 'is_applicable', 'not_applicable_reason',
             'line_type', 'sort_order',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'job_role_name', 'job_role_code', 'total_count',
+            'created_at', 'updated_at',
+        ]
+        validators = []
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        survey = attrs.get('survey') or (self.instance.survey if self.instance else None)
+        job_role = attrs.get('job_role') or (self.instance.job_role if self.instance else None)
+        description = attrs.get('description') or (self.instance.description if self.instance else '')
+
+        if job_role is not None:
+            if survey is not None and job_role.org_id != survey.lead.org_id:
+                raise serializers.ValidationError({
+                    'job_role': 'Job role must belong to the same organization as the survey.',
+                })
+            if not attrs.get('description') and not description:
+                attrs['description'] = job_role.name
+            elif not attrs.get('description') and not self.instance:
+                attrs['description'] = job_role.name
+
+        final_description = attrs.get('description') or description
+        if survey is not None and final_description:
+            qs = SiteSurveyShiftDeployment.objects.filter(
+                survey=survey,
+                description__iexact=final_description,
+            )
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'description': 'A deployment row for this role/description already exists in the survey.',
+                })
+
+        return attrs
+
+    @staticmethod
+    def _decimal_value(value):
+        if value is None:
+            return Decimal('0')
+        return Decimal(str(value))
+
+    def _apply_calculated_total(self, attrs):
+        source = self.instance
+
+        def count_for(field):
+            if field in attrs:
+                return self._decimal_value(attrs.get(field))
+            if source is not None:
+                return self._decimal_value(getattr(source, field, 0))
+            return Decimal('0')
+
+        attrs['total_count'] = (
+            count_for('general_count')
+            + count_for('first_shift_count')
+            + count_for('second_shift_count')
+            + count_for('night_shift_count')
+        )
+        return attrs
+
+    def create(self, validated_data):
+        return super().create(self._apply_calculated_total(validated_data))
+
+    def update(self, instance, validated_data):
+        return super().update(instance, self._apply_calculated_total(validated_data))
 
 
 class SiteSurveyLocationLineSerializer(serializers.ModelSerializer):

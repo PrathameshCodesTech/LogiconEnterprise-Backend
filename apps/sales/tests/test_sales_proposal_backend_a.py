@@ -36,10 +36,11 @@ from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
 from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
-from apps.wages.models import MinimumWageRate
+from apps.wages.models import MinimumWageRate, WageCategory
 from apps.sales.models import (
     SalesLead, SalesLeadSite, SiteSurvey, SalesRoleRequirement,
     ProposalVersion, ProposalBudgetLine, ProposalBreakupLine,
+    SiteSurveyShiftDeployment, SurveyRoleMapping,
 )
 from apps.sales.services import (
     submit_to_operations, complete_site_survey, mark_survey_in_progress,
@@ -227,6 +228,42 @@ class TestSurveyFlow(TestCase):
     def test_complete_survey_transitions_lead(self):
         submit_to_operations(self.lead, self.user)
         mark_survey_in_progress(self.lead, self.user)
+        survey = SiteSurvey.objects.get(lead=self.lead, site=self.site)
+        with self.assertRaisesRegex(ValueError, 'Generate role requirements'):
+            complete_site_survey(self.lead, self.user)
+
+        SiteSurveyShiftDeployment.objects.filter(survey=survey).delete()
+        job_role = _job_role(self.org)
+        wage_category = WageCategory.objects.create(
+            name='Skilled Survey A',
+            code='skilled_survey_a',
+        )
+        SurveyRoleMapping.objects.create(
+            org=self.org,
+            description_text='Security Guard',
+            job_role=job_role,
+            wage_category=wage_category,
+            service_category='Security',
+        )
+        SiteSurveyShiftDeployment.objects.create(
+            survey=survey,
+            description='Security Guard',
+            total_count=5,
+            line_type='item',
+            is_applicable=True,
+        )
+        SalesRoleRequirement.objects.create(
+            lead=self.lead,
+            site=self.site,
+            survey=survey,
+            job_role=job_role,
+            wage_category=wage_category,
+            service_category='Security',
+            manpower_count=5,
+            is_active=True,
+            created_from_survey=True,
+        )
+
         complete_site_survey(self.lead, self.user)
         self.lead.refresh_from_db()
         self.assertEqual(self.lead.current_stage, 'site_survey_completed')

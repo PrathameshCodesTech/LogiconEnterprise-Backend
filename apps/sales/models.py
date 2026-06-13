@@ -549,6 +549,8 @@ class SalesProposalClientToken(models.Model):
     token_hash = models.CharField(max_length=64, unique=True, db_index=True)
     recipient_email = models.EmailField()
     recipient_name = models.CharField(max_length=255, blank=True)
+    email_subject = models.CharField(max_length=255, blank=True)
+    email_body = models.TextField(blank=True)
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True, blank=True)
     is_revoked = models.BooleanField(default=False)
@@ -729,10 +731,19 @@ class SiteSurveyShiftDeployment(TimeStampedModel):
     survey = models.ForeignKey(
         SiteSurvey, on_delete=models.CASCADE, related_name='shift_deployments',
     )
+    job_role = models.ForeignKey(
+        'jobs.JobRole',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='survey_shift_deployments',
+        help_text='Optional structured role for rows added from the job role master.',
+    )
     description = models.CharField(max_length=200)
     general_count = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     first_shift_count = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     second_shift_count = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    night_shift_count = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total_count = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     remarks = models.TextField(blank=True)
     is_applicable = models.BooleanField(default=True)

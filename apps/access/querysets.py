@@ -22,6 +22,7 @@ All filters use .distinct() where joins may produce duplicate rows.
 
 from django.db.models import Q
 
+from apps.access.capabilities import is_sales_persona_user
 from apps.access.scope import get_accessible_scope_paths
 
 
@@ -38,6 +39,88 @@ def _scope_q(field: str, paths: set) -> Q:
     for p in paths:
         q |= Q(**{field: p}) | Q(**{f'{field}__startswith': p + '/'})
     return q
+
+
+def _sales_owned_client_q(user) -> Q:
+    """
+    Client rows owned by a sales persona.
+
+    Covers explicit ownership, manual creation, clients created from owned leads,
+    existing clients used in owned expansion leads, and clients receiving sites
+    created from owned leads.
+    """
+    return (
+        Q(owner_sales_user=user) |
+        Q(created_by=user) |
+        Q(source_sales_lead__sales_person=user) |
+        Q(source_sales_lead__created_by=user) |
+        Q(expansion_leads__sales_person=user) |
+        Q(expansion_leads__created_by=user) |
+        Q(sites__created_by=user) |
+        Q(sites__source_sales_lead__sales_person=user) |
+        Q(sites__source_sales_lead__created_by=user)
+    )
+
+
+def _sales_owned_site_q(user) -> Q:
+    """Site rows owned by a sales persona directly or through the parent client."""
+    return (
+        Q(created_by=user) |
+        Q(source_sales_lead__sales_person=user) |
+        Q(source_sales_lead__created_by=user) |
+        Q(client__owner_sales_user=user) |
+        Q(client__created_by=user) |
+        Q(client__source_sales_lead__sales_person=user) |
+        Q(client__source_sales_lead__created_by=user) |
+        Q(client__expansion_leads__sales_person=user) |
+        Q(client__expansion_leads__created_by=user)
+    )
+
+
+def _sales_owned_budget_q(user) -> Q:
+    """Budget rows owned by a sales persona through source lead, client, or site."""
+    return (
+        Q(created_by=user) |
+        Q(source_sales_lead__sales_person=user) |
+        Q(source_sales_lead__created_by=user) |
+        Q(source_proposal_version__lead__sales_person=user) |
+        Q(source_proposal_version__lead__created_by=user) |
+        Q(client__owner_sales_user=user) |
+        Q(client__created_by=user) |
+        Q(client__source_sales_lead__sales_person=user) |
+        Q(client__source_sales_lead__created_by=user) |
+        Q(client__expansion_leads__sales_person=user) |
+        Q(client__expansion_leads__created_by=user) |
+        Q(site__created_by=user) |
+        Q(site__source_sales_lead__sales_person=user) |
+        Q(site__source_sales_lead__created_by=user) |
+        Q(site__client__owner_sales_user=user) |
+        Q(site__client__created_by=user) |
+        Q(site__client__source_sales_lead__sales_person=user) |
+        Q(site__client__source_sales_lead__created_by=user)
+    )
+
+
+def _sales_owned_mobilisation_q(user) -> Q:
+    """Mobilisation rows owned by a sales persona through request/source/client/budget."""
+    return (
+        Q(requested_by=user) |
+        Q(source_sales_lead__sales_person=user) |
+        Q(source_sales_lead__created_by=user) |
+        Q(source_proposal_version__lead__sales_person=user) |
+        Q(source_proposal_version__lead__created_by=user) |
+        Q(client__owner_sales_user=user) |
+        Q(client__created_by=user) |
+        Q(client__source_sales_lead__sales_person=user) |
+        Q(client__source_sales_lead__created_by=user) |
+        Q(client__expansion_leads__sales_person=user) |
+        Q(client__expansion_leads__created_by=user) |
+        Q(budget_plan__created_by=user) |
+        Q(budget_plan__source_sales_lead__sales_person=user) |
+        Q(budget_plan__source_sales_lead__created_by=user) |
+        Q(budget_plan__source_proposal_version__lead__sales_person=user) |
+        Q(budget_plan__source_proposal_version__lead__created_by=user)
+    )
 
 
 def filter_scope_nodes_for_user(queryset, user):
@@ -60,7 +143,10 @@ def filter_clients_for_user(queryset, user):
     paths = get_accessible_scope_paths(user)
     if not paths:
         return queryset.none()
-    return queryset.filter(_scope_q('scope_node__path', paths)).distinct()
+    scoped = queryset.filter(_scope_q('scope_node__path', paths))
+    if is_sales_persona_user(user):
+        scoped = scoped.filter(_sales_owned_client_q(user))
+    return scoped.distinct()
 
 
 def filter_sites_for_user(queryset, user):
@@ -76,7 +162,10 @@ def filter_sites_for_user(queryset, user):
         return queryset.none()
     site_q = _scope_q('scope_node__path', paths)
     client_q = _scope_q('client__scope_node__path', paths)
-    return queryset.filter(site_q | client_q).distinct()
+    scoped = queryset.filter(site_q | client_q)
+    if is_sales_persona_user(user):
+        scoped = scoped.filter(_sales_owned_site_q(user))
+    return scoped.distinct()
 
 
 def filter_departments_for_user(queryset, user):
@@ -130,7 +219,10 @@ def filter_mobilisation_requests_for_user(queryset, user):
     org_id = getattr(user, 'org_id', None)
     client_q = _scope_q('client__scope_node__path', paths)
     no_client_q = Q(client__isnull=True, org_id=org_id) if org_id else Q(pk__in=[])
-    return queryset.filter(client_q | no_client_q).distinct()
+    scoped = queryset.filter(client_q | no_client_q)
+    if is_sales_persona_user(user):
+        scoped = scoped.filter(_sales_owned_mobilisation_q(user))
+    return scoped.distinct()
 
 
 def filter_onboarding_requests_for_user(queryset, user):
@@ -193,17 +285,21 @@ def filter_budget_plans_for_user(queryset, user):
         return queryset.none()
     org_id = getattr(user, 'org_id', None)
     if org_id and any('/' not in p for p in paths):
-        return queryset.filter(org_id=org_id).distinct()
-    client_q = _scope_q('client__scope_node__path', paths)
-    site_q = _scope_q('site__scope_node__path', paths)
-    site_client_q = _scope_q('site__client__scope_node__path', paths)
-    dept_client_q = _scope_q('department__client__scope_node__path', paths)
-    dept_site_q = _scope_q('department__site__scope_node__path', paths)
-    dept_site_client_q = _scope_q('department__site__client__scope_node__path', paths)
-    return queryset.filter(
-        client_q | site_q | site_client_q |
-        dept_client_q | dept_site_q | dept_site_client_q
-    ).distinct()
+        scoped = queryset.filter(org_id=org_id)
+    else:
+        client_q = _scope_q('client__scope_node__path', paths)
+        site_q = _scope_q('site__scope_node__path', paths)
+        site_client_q = _scope_q('site__client__scope_node__path', paths)
+        dept_client_q = _scope_q('department__client__scope_node__path', paths)
+        dept_site_q = _scope_q('department__site__scope_node__path', paths)
+        dept_site_client_q = _scope_q('department__site__client__scope_node__path', paths)
+        scoped = queryset.filter(
+            client_q | site_q | site_client_q |
+            dept_client_q | dept_site_q | dept_site_client_q
+        )
+    if is_sales_persona_user(user):
+        scoped = scoped.filter(_sales_owned_budget_q(user))
+    return scoped.distinct()
 
 
 def filter_hiring_applications_for_user(queryset, user):

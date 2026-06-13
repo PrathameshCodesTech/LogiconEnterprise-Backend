@@ -26,6 +26,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.access.capabilities import (
+    MOBILISATION_CREATE,
     SALES_LEAD_READ, SALES_LEAD_CREATE, SALES_LEAD_UPDATE,
     SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE, SALES_PROPOSAL_UPDATE,
     SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
@@ -126,6 +127,7 @@ def _job_role(org):
 
 def _all_sales_caps():
     return [
+        MOBILISATION_CREATE,
         SALES_LEAD_READ, SALES_LEAD_CREATE, SALES_LEAD_UPDATE,
         SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE, SALES_PROPOSAL_UPDATE,
         SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
@@ -176,10 +178,13 @@ def _won_lead_with_proposal(org, user):
     return lead, proposal, site
 
 
-def _access_role(org, code='client_role'):
+def _access_role(org, code='client_admin'):
     role = AccessRole.objects.get_or_create(
-        org=org, code=code, defaults={'name': code, 'is_active': True},
+        org=org, code=code, defaults={'name': code, 'node_type_scope': 'client', 'is_active': True},
     )[0]
+    if role.node_type_scope != 'client':
+        role.node_type_scope = 'client'
+        role.save(update_fields=['node_type_scope'])
     return role
 
 

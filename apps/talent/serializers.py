@@ -9,12 +9,13 @@ import json
 from rest_framework import serializers
 
 from apps.hiring.models import PipelineStage
+from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
 
 from .models import (
     Candidate, Resume, CandidateSkill,
     ParsedResume, CandidateExperience, CandidateEducation,
-    TalentResumeReview,
+    TalentResumeReview, ResumeImportBatch, ResumeImportItem,
 )
 
 
@@ -34,10 +35,25 @@ class CandidateSkillSerializer(serializers.ModelSerializer):
 class CandidateSerializer(serializers.ModelSerializer):
     """Read serializer — returned for all list/retrieve/create/update responses."""
     full_name = serializers.CharField(read_only=True)
+    target_job_role_name = serializers.CharField(source='target_job_role.name', read_only=True)
+    target_job_role_code = serializers.CharField(source='target_job_role.code', read_only=True)
     skills_count = serializers.SerializerMethodField()
     resume_count = serializers.SerializerMethodField()
     latest_resume_status = serializers.SerializerMethodField()
+    latest_document_type = serializers.SerializerMethodField()
+    latest_source_type = serializers.SerializerMethodField()
     active_application_count = serializers.SerializerMethodField()
+    profile_quality = serializers.SerializerMethodField()
+    profile_quality_score = serializers.SerializerMethodField()
+    journey_status = serializers.SerializerMethodField()
+    journey_status_label = serializers.SerializerMethodField()
+    latest_application_id = serializers.SerializerMethodField()
+    latest_application_status = serializers.SerializerMethodField()
+    latest_offer_status = serializers.SerializerMethodField()
+    employee_id = serializers.SerializerMethodField()
+    employee_status = serializers.SerializerMethodField()
+    deployment_id = serializers.SerializerMethodField()
+    deployment_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Candidate
@@ -49,13 +65,30 @@ class CandidateSerializer(serializers.ModelSerializer):
             'source', 'is_blacklisted', 'blacklist_reason',
             'lifecycle_status', 'availability_status',
             'preferred_location', 'notice_period_days',
-            'current_company', 'current_role', 'source_reference',
-            'is_duplicate', 'do_not_contact',
+            'current_company', 'current_role',
+            'target_job_role', 'target_job_role_name', 'target_job_role_code',
+            'source_reference',
+            'is_duplicate', 'duplicate_of', 'do_not_contact',
             'skills_count', 'resume_count',
-            'latest_resume_status', 'active_application_count',
+            'latest_resume_status', 'latest_document_type', 'latest_source_type',
+            'active_application_count',
+            'profile_quality', 'profile_quality_score',
+            'journey_status', 'journey_status_label',
+            'latest_application_id', 'latest_application_status',
+            'latest_offer_status',
+            'employee_id', 'employee_status',
+            'deployment_id', 'deployment_status',
             'created_at', 'updated_at',
         ]
         read_only_fields = [f for f in fields if f != 'id']
+
+    def _journey(self, obj):
+        cached = getattr(obj, '_candidate_journey_status', None)
+        if cached is None:
+            from .services import candidate_journey_status
+            cached = candidate_journey_status(obj)
+            setattr(obj, '_candidate_journey_status', cached)
+        return cached
 
     def get_skills_count(self, obj):
         return obj.skills.count()
@@ -67,10 +100,68 @@ class CandidateSerializer(serializers.ModelSerializer):
         r = obj.resumes.order_by('-uploaded_at').values('status').first()
         return r['status'] if r else None
 
+    def get_latest_document_type(self, obj):
+        r = obj.resumes.order_by('-uploaded_at').values('document_type').first()
+        if r:
+            return r['document_type']
+        item = (
+            obj.resume_import_items
+            .select_related('batch')
+            .order_by('-created_at')
+            .first()
+        )
+        return item.document_type if item else None
+
+    def get_latest_source_type(self, obj):
+        r = obj.resumes.order_by('-uploaded_at').values('source_type').first()
+        if r:
+            return r['source_type']
+        item = (
+            obj.resume_import_items
+            .select_related('batch')
+            .order_by('-created_at')
+            .first()
+        )
+        return item.batch.source_type if item else None
+
     def get_active_application_count(self, obj):
         return obj.hiring_applications.exclude(
             status__in=['rejected', 'cancelled']
         ).count()
+
+    def get_profile_quality(self, obj):
+        from .services import candidate_profile_quality
+        return candidate_profile_quality(obj)
+
+    def get_profile_quality_score(self, obj):
+        return self.get_profile_quality(obj)['score']
+
+    def get_journey_status(self, obj):
+        return self._journey(obj)['journey_status']
+
+    def get_journey_status_label(self, obj):
+        return self._journey(obj)['journey_status_label']
+
+    def get_latest_application_id(self, obj):
+        return self._journey(obj)['latest_application_id']
+
+    def get_latest_application_status(self, obj):
+        return self._journey(obj)['latest_application_status']
+
+    def get_latest_offer_status(self, obj):
+        return self._journey(obj)['latest_offer_status']
+
+    def get_employee_id(self, obj):
+        return self._journey(obj)['employee_id']
+
+    def get_employee_status(self, obj):
+        return self._journey(obj)['employee_status']
+
+    def get_deployment_id(self, obj):
+        return self._journey(obj)['deployment_id']
+
+    def get_deployment_status(self, obj):
+        return self._journey(obj)['deployment_status']
 
 
 class CandidateWriteSerializer(serializers.ModelSerializer):
@@ -84,7 +175,8 @@ class CandidateWriteSerializer(serializers.ModelSerializer):
             'total_experience_years', 'current_ctc', 'expected_ctc',
             'source', 'lifecycle_status', 'availability_status',
             'preferred_location', 'notice_period_days',
-            'current_company', 'current_role', 'source_reference',
+            'current_company', 'current_role',
+            'target_job_role', 'source_reference',
         ]
         extra_kwargs = {
             'phone': {'required': True},
@@ -98,18 +190,37 @@ class CandidateWriteSerializer(serializers.ModelSerializer):
         normalize_phone(value)
         return value
 
+    def validate_target_job_role(self, value):
+        if value is None:
+            return value
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        org_id = getattr(user, 'org_id', None)
+        if org_id and value.org_id != org_id:
+            raise serializers.ValidationError(
+                'Target job role does not belong to your organization.'
+            )
+        return value
+
 
 # ─── Resume ───────────────────────────────────────────────────────────────────
 
 class ResumeSerializer(serializers.ModelSerializer):
     """Read serializer for resumes."""
+    target_job_role_name = serializers.CharField(source='target_job_role.name', read_only=True)
+    target_job_role_code = serializers.CharField(source='target_job_role.code', read_only=True)
+    candidate_full_name = serializers.CharField(source='candidate.full_name', read_only=True)
+    candidate_phone = serializers.CharField(source='candidate.phone', read_only=True)
 
     class Meta:
         model = Resume
         fields = [
             'id', 'candidate', 'file', 'original_filename', 'content_type',
+            'candidate_full_name', 'candidate_phone',
             'size_bytes', 'parsed_status', 'uploaded_at', 'view_only_note',
-            'status', 'file_hash', 'source_type',
+            'status', 'file_hash', 'document_type', 'source_type',
+            'target_job_role', 'target_job_role_name', 'target_job_role_code',
+            'target_role_source', 'import_batch_id',
             'ocr_used', 'extraction_engine', 'extraction_confidence',
             'parser_engine', 'parser_confidence',
             'error_message', 'manual_review_reason',
@@ -126,19 +237,123 @@ class ResumeWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Resume
-        fields = ['candidate', 'file', 'source_type', 'view_only_note']
+        fields = [
+            'candidate', 'file', 'source_type', 'view_only_note',
+            'target_job_role', 'target_role_source',
+        ]
         extra_kwargs = {
             'source_type': {'required': False},
             'view_only_note': {'required': False},
+            'target_job_role': {'required': False, 'allow_null': True},
+            'target_role_source': {'required': False, 'allow_blank': True},
         }
 
     def validate_source_type(self, value):
-        allowed = {'manual_upload', 'recruiter_upload', 'portal', 'referral'}
+        allowed = {
+            'manual_upload', 'recruiter_upload', 'portal', 'referral',
+            'bulk_upload', 'campaign', 'qr_intake',
+        }
         if value not in allowed:
             raise serializers.ValidationError(
                 f"source_type must be one of: {', '.join(sorted(allowed))}."
             )
         return value
+
+    def validate_target_job_role(self, value):
+        if value is None:
+            return value
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        org_id = getattr(user, 'org_id', None)
+        if org_id and value.org_id != org_id:
+            raise serializers.ValidationError(
+                'Target job role does not belong to your organization.'
+            )
+        return value
+
+
+class ResumeBulkUploadSerializer(serializers.Serializer):
+    """Input for POST /api/talent/resumes/bulk-upload/."""
+
+    files = serializers.ListField(child=serializers.FileField(), allow_empty=False)
+    target_job_role = serializers.PrimaryKeyRelatedField(queryset=JobRole.objects.all())
+    source_type = serializers.ChoiceField(
+        choices=['bulk_upload', 'recruiter_upload', 'manual_upload', 'campaign'],
+        default='bulk_upload',
+        required=False,
+    )
+    view_only_note = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, default='',
+    )
+
+    def validate_target_job_role(self, value):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        org_id = getattr(user, 'org_id', None)
+        if org_id and value.org_id != org_id:
+            raise serializers.ValidationError(
+                'Target job role does not belong to your organization.'
+            )
+        return value
+
+
+class ResumeExcelImportSerializer(serializers.Serializer):
+    """Input for POST /api/talent/resumes/excel-import/."""
+
+    file = serializers.FileField()
+    target_job_role = serializers.PrimaryKeyRelatedField(
+        queryset=JobRole.objects.all(), required=False, allow_null=True,
+    )
+    source_type = serializers.ChoiceField(
+        choices=['excel_import', 'bulk_upload', 'campaign'],
+        default='excel_import',
+        required=False,
+    )
+
+    def validate_target_job_role(self, value):
+        if value is None:
+            return value
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        org_id = getattr(user, 'org_id', None)
+        if org_id and value.org_id != org_id:
+            raise serializers.ValidationError(
+                'Target job role does not belong to your organization.'
+            )
+        return value
+
+
+class ResumeImportItemSerializer(serializers.ModelSerializer):
+    candidate_name = serializers.CharField(source='candidate.full_name', read_only=True)
+    candidate_phone = serializers.CharField(source='candidate.phone', read_only=True)
+
+    class Meta:
+        model = ResumeImportItem
+        fields = [
+            'id', 'original_filename', 'content_type', 'size_bytes',
+            'document_type', 'row_number',
+            'status', 'error_message', 'candidate', 'candidate_name',
+            'candidate_phone', 'resume', 'processed_at', 'created_at',
+        ]
+
+
+class ResumeImportBatchSerializer(serializers.ModelSerializer):
+    target_job_role_name = serializers.CharField(source='target_job_role.name', read_only=True)
+    target_job_role_code = serializers.CharField(source='target_job_role.code', read_only=True)
+    items = ResumeImportItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ResumeImportBatch
+        fields = [
+            'id', 'org', 'target_job_role', 'target_job_role_name',
+            'target_job_role_code', 'source_type', 'status',
+            'import_file', 'original_filename', 'content_type',
+            'size_bytes', 'document_type',
+            'total_count', 'processed_count', 'success_count',
+            'duplicate_count', 'failed_count', 'manual_review_count',
+            'view_only_note', 'created_by', 'created_at', 'updated_at',
+            'items',
+        ]
 
 
 class ResumePatchSerializer(serializers.ModelSerializer):
@@ -292,7 +507,7 @@ class ResumeReviewQueueSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'original_filename', 'status', 'manual_review_reason', 'error_message',
             'parser_engine', 'parser_confidence', 'extraction_engine', 'extraction_confidence',
-            'uploaded_at', 'source_type', 'uploaded_by',
+            'uploaded_at', 'source_type', 'document_type', 'uploaded_by',
             'candidate_summary', 'parsed_resume_summary',
         ]
 
@@ -316,7 +531,7 @@ class ResumeReviewDetailSerializer(serializers.ModelSerializer):
         model = Resume
         fields = [
             'id', 'original_filename', 'content_type', 'size_bytes',
-            'status', 'manual_review_reason', 'error_message',
+            'status', 'manual_review_reason', 'error_message', 'document_type',
             'parser_engine', 'parser_confidence', 'extraction_engine', 'extraction_confidence',
             'raw_text', 'cleaned_text', 'uploaded_at', 'source_type',
             'candidate', 'parsed_resume', 'parsed_skills', 'parsed_experience', 'parsed_education',
@@ -433,4 +648,9 @@ class ResumeDuplicateResolutionSerializer(serializers.Serializer):
     candidate = serializers.PrimaryKeyRelatedField(
         queryset=Candidate.objects.all(), required=False, allow_null=True, default=None,
     )
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class CandidateMergeSerializer(serializers.Serializer):
+    target_candidate = serializers.PrimaryKeyRelatedField(queryset=Candidate.objects.all())
     note = serializers.CharField(required=False, allow_blank=True, default='')

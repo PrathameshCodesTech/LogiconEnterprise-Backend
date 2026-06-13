@@ -11,6 +11,8 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from .models import Offer
+from .interview_services import validate_offer_ready
+from .lanes import requires_client_review_for_application
 from .lifecycle import (
     STAGE_CLIENT_APPROVED,
     STAGE_OFFER,
@@ -20,7 +22,6 @@ from .lifecycle import (
 )
 
 
-_OFFER_CREATE_ALLOWED_STATUSES = {'selected'}
 _OFFER_IMMUTABLE_STATUSES = {'accepted', 'declined', 'withdrawn', 'expired'}
 
 
@@ -40,15 +41,12 @@ def create_or_update_offer(application, actor, payload: dict) -> Offer:
 
     payload keys: offered_ctc, salary_breakup, joining_date, notes
     """
-    if application.status not in _OFFER_CREATE_ALLOWED_STATUSES:
-        raise ValidationError({
-            'non_field_errors': (
-                f"Offers can only be created for applications with status 'selected'. "
-                f"Current: '{application.status}'."
-            )
-        })
+    validate_offer_ready(application)
 
-    if application.client_visible and application.client_decision != 'approved':
+    if (
+        requires_client_review_for_application(application)
+        and application.client_decision != 'approved'
+    ):
         raise ValidationError({
             'non_field_errors': 'Client approval is required before creating an offer.'
         })
@@ -120,7 +118,10 @@ def release_offer(offer, actor, note='') -> Offer:
             )
         })
 
-    if application.client_visible and application.client_decision != 'approved':
+    if (
+        requires_client_review_for_application(application)
+        and application.client_decision != 'approved'
+    ):
         raise ValidationError({
             'non_field_errors': 'Client approval is required before releasing an offer.'
         })

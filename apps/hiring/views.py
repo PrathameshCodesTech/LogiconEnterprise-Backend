@@ -52,6 +52,7 @@ from .serializers import (
     InterviewPlanSerializer,
     InterviewSerializer,
     InterviewFeedbackSerializer,
+    InterviewAssignmentSerializer,
     OfferSerializer,
     OfferCreateSerializer,
     OfferUpdateSerializer,
@@ -72,6 +73,23 @@ from .lifecycle import (
     default_initial_stage,
     transition_application,
 )
+from .interview_services import (
+    BLOCKED_APPLICATION_STATUSES,
+    all_required_plan_rounds_passed,
+    apply_interview_feedback_effect,
+    interview_assignment_state,
+    notify_interview_scheduled,
+    passed_required_plan_round_ids,
+    required_plan_round_ids,
+    user_can_manage_interviews,
+    validate_planned_round_can_be_scheduled,
+)
+from .lanes import (
+    LANE_CLIENT_BILLABLE,
+    LANE_INTERNAL_NON_BILLABLE,
+    requires_client_review_for_application,
+    requires_client_review_for_mrf,
+)
 
 
 # ─── Client review helper ────────────────────────────────────────────────────
@@ -89,6 +107,13 @@ def _apply_send_to_client_review(application, actor, note=''):
     Returns 'sent' or 'skipped' (already in state with no note to update).
     Raises ValidationError for blocked statuses.
     """
+    if not requires_client_review_for_application(application):
+        raise ValidationError({
+            'non_field_errors': (
+                'Internal non-billable hiring does not use client review.'
+            )
+        })
+
     if application.status in _SEND_REVIEW_BLOCKED:
         raise ValidationError({
             'non_field_errors': (
@@ -122,35 +147,15 @@ def _apply_send_to_client_review(application, actor, note=''):
 
 
 def _required_plan_round_ids(application):
-    plan = application.interview_plan
-    if plan is None:
-        return set()
-    return set(
-        plan.rounds
-        .filter(is_required=True, is_active=True)
-        .values_list('id', flat=True)
-    )
+    return required_plan_round_ids(application)
 
 
 def _passed_required_plan_round_ids(application):
-    return set(
-        Interview.objects
-        .filter(
-            hiring_application=application,
-            planned_round__isnull=False,
-            status='completed',
-            feedbacks__recommendation='proceed',
-        )
-        .values_list('planned_round_id', flat=True)
-        .distinct()
-    )
+    return passed_required_plan_round_ids(application)
 
 
 def _all_required_plan_rounds_passed(application):
-    required_ids = _required_plan_round_ids(application)
-    if not required_ids:
-        return True
-    return required_ids.issubset(_passed_required_plan_round_ids(application))
+    return all_required_plan_rounds_passed(application)
 
 
 def _next_interview_bucket(application, interviews, feedbacks):
@@ -536,6 +541,13 @@ class HiringApplicationViewSet(
         """
         application = self.get_object()
 
+        if not requires_client_review_for_application(application):
+            raise ValidationError({
+                'non_field_errors': (
+                    'Internal non-billable hiring does not use client decisions.'
+                )
+            })
+
         if not application.client_visible:
             raise ValidationError(
                 {'non_field_errors': 'Application has not been sent to client review.'}
@@ -658,7 +670,9 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
     def get_queryset(self):
         from apps.mrf.models import MRFLineItem
         qs = MRFLineItem.objects.filter(mrf__status='approved').select_related(
-            'mrf', 'mrf__site', 'mrf__site__client', 'job_role',
+            'mrf', 'mrf__site', 'mrf__site__client',
+            'mrf__requesting_department', 'mrf__required_department',
+            'mrf__budget_plan', 'job_role',
         ).order_by('mrf', 'id').annotate(
             application_count=Count('hiring_applications'),
             shortlisted_count=Count(
@@ -683,10 +697,22 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
         )
         user = self.request.user
         if user.is_superuser:
-            return qs
+            return self._apply_lane_filters(qs)
         if is_client_facing_user(user):
             return qs.none()
-        return filter_mrf_line_items_for_user(qs, user)
+        return self._apply_lane_filters(filter_mrf_line_items_for_user(qs, user))
+
+    def _apply_lane_filters(self, qs):
+        billing_type = self.request.query_params.get('billing_type', '').strip()
+        if billing_type in {'billable', 'non_billable'}:
+            qs = qs.filter(mrf__billing_type=billing_type)
+
+        hiring_lane = self.request.query_params.get('hiring_lane', '').strip()
+        if hiring_lane == LANE_CLIENT_BILLABLE:
+            qs = qs.filter(mrf__billing_type='billable')
+        elif hiring_lane == LANE_INTERNAL_NON_BILLABLE:
+            qs = qs.filter(mrf__billing_type='non_billable')
+        return qs
 
     @action(detail=True, methods=['get'], url_path='candidate-pool')
     def candidate_pool(self, request, pk=None):
@@ -794,6 +820,13 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
                 raise PermissionDenied('hiring_application.update capability required.')
 
         demand = self.get_object()
+        if not requires_client_review_for_mrf(demand.mrf):
+            raise ValidationError({
+                'non_field_errors': (
+                    'Internal non-billable hiring does not use client review.'
+                )
+            })
+
         serializer = BulkSendToClientReviewSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -867,8 +900,15 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
         first_stage = default_initial_stage(mrf.org)
 
         match_score = None
+        match_snapshot = {}
         if match_result:
+            if match_result.candidate_id != candidate.pk or match_result.mrf_line_item_id != demand.pk:
+                raise ValidationError(
+                    {'match_result': 'Match result must belong to this candidate and hiring demand.'}
+                )
             match_score = match_result.final_score if match_result.final_score is not None else match_result.match_score
+            from apps.hiring.matching.services import match_result_snapshot
+            match_snapshot = match_result_snapshot(match_result)
 
         application = HiringApplication.objects.create(
             org=mrf.org,
@@ -882,6 +922,8 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
             shortlisted_by=request.user,
             shortlisted_at=timezone.now(),
             match_score=match_score,
+            match_result=match_result,
+            match_snapshot=match_snapshot,
         )
 
         ApplicationStageHistory.objects.create(
@@ -975,6 +1017,7 @@ class InterviewViewSet(ActionCapabilityMixin, ModelViewSet):
         'retrieve': INTERVIEW_READ,
         'create': INTERVIEW_CREATE,
         'partial_update': INTERVIEW_MANAGE,
+        'assignments': INTERVIEW_READ,
     }
 
     def get_queryset(self):
@@ -989,37 +1032,95 @@ class InterviewViewSet(ActionCapabilityMixin, ModelViewSet):
         client_q = _scope_q('hiring_application__site__client__scope_node__path', paths)
         return qs.filter(site_q | client_q).distinct()
 
-    filterset_fields = ['hiring_application', 'round_type', 'status', 'mode']
+    filterset_fields = ['hiring_application', 'round_type', 'status', 'mode', 'interviewer']
+
+    @action(detail=False, methods=['get'], url_path='assignments')
+    def assignments(self, request):
+        """
+        Interview execution queue.
+
+        Defaults to interviews assigned to the current user. HR/admin users with
+        interview.manage can pass mine=false to see the scoped queue.
+        """
+        qs = self.filter_queryset(self.get_queryset()).select_related(
+            'hiring_application__candidate',
+            'hiring_application__site__client',
+            'hiring_application__job_role',
+            'planned_round',
+            'interviewer',
+            'scheduled_by',
+        ).prefetch_related('feedbacks')
+
+        mine = str(request.query_params.get('mine', 'true')).lower()
+        if mine != 'false' or not user_can_manage_interviews(request.user):
+            qs = qs.filter(interviewer=request.user)
+
+        state_filter = request.query_params.get('assignment_state') or request.query_params.get('state')
+        items = []
+        counts = {
+            'upcoming': 0,
+            'pending_feedback': 0,
+            'held': 0,
+            'rejected': 0,
+            'completed': 0,
+        }
+        for interview in qs.order_by('scheduled_at', 'round_number', 'id'):
+            state_value = interview_assignment_state(interview)
+            if state_value in counts:
+                counts[state_value] += 1
+            if state_filter and state_filter != 'all' and state_filter != state_value:
+                continue
+            interview.assignment_state = state_value
+            items.append(interview)
+
+        return Response({
+            'count': len(items),
+            'counts': counts,
+            'results': InterviewAssignmentSerializer(items, many=True).data,
+        })
 
     def perform_create(self, serializer):
         application = serializer.validated_data['hiring_application']
         if not self.request.user.is_superuser and application.org_id != getattr(self.request.user, 'org_id', None):
             raise PermissionDenied('Cross-org interview scheduling is not allowed.')
-        if application.status in {'rejected', 'cancelled', 'deployed', 'offer_released', 'offer_accepted', 'offer_declined'}:
+        if application.status in BLOCKED_APPLICATION_STATUSES:
             raise ValidationError({
                 'non_field_errors': f"Cannot schedule interview for application in status '{application.status}'."
             })
         planned_round = serializer.validated_data.get('planned_round')
         if planned_round is not None:
-            if planned_round.plan.org_id != application.org_id:
-                raise ValidationError({'planned_round': 'Planned round does not belong to this application organization.'})
-            if application.interview_plan_id and planned_round.plan_id != application.interview_plan_id:
-                raise ValidationError({'planned_round': 'Planned round is not part of the selected interview plan.'})
+            validate_planned_round_can_be_scheduled(application, planned_round)
             application.interview_plan = planned_round.plan
             application.save(update_fields=['interview_plan', 'updated_at'])
         scheduled_by = serializer.validated_data.get('scheduled_by') or self.request.user
-        serializer.save(scheduled_by=scheduled_by)
+        interview = serializer.save(scheduled_by=scheduled_by)
+        notify_interview_scheduled(interview, self.request.user)
         transition_application(
             application,
             actor=self.request.user,
-            status='interview_scheduled',
+            status='interview_scheduled' if interview.status in {'scheduled', 'rescheduled'} else 'interview_in_progress',
             stage_code=STAGE_INTERVIEW,
-            comment=f"Interview round scheduled: {serializer.instance.round_type}.",
+            comment=f"Interview round {interview.status}: {interview.round_type}.",
         )
 
     def perform_update(self, serializer):
+        interview = self.get_object()
+        planned_round = serializer.validated_data.get('planned_round', interview.planned_round)
+        if planned_round is not None:
+            validate_planned_round_can_be_scheduled(
+                interview.hiring_application,
+                planned_round,
+                current_interview=interview,
+            )
+        old_interviewer_id = interview.interviewer_id
         interview = serializer.save()
         application = interview.hiring_application
+        if (
+            interview.interviewer_id
+            and interview.interviewer_id != old_interviewer_id
+            and interview.status in {'scheduled', 'rescheduled'}
+        ):
+            notify_interview_scheduled(interview, self.request.user)
         if interview.status in {'pending', 'scheduled', 'rescheduled'}:
             transition_application(
                 application,
@@ -1065,47 +1166,17 @@ class InterviewFeedbackViewSet(ActionCapabilityMixin, ModelViewSet):
         application = interview.hiring_application
         if not self.request.user.is_superuser and application.org_id != getattr(self.request.user, 'org_id', None):
             raise PermissionDenied('Cross-org interview feedback is not allowed.')
-        given_by = serializer.validated_data.get('given_by') or self.request.user
-        serializer.save(given_by=given_by)
+        manager = user_can_manage_interviews(self.request.user)
+        requested_given_by = serializer.validated_data.get('given_by')
+        if not manager:
+            if interview.interviewer_id != self.request.user.pk:
+                raise PermissionDenied('Only the assigned interviewer can submit feedback for this interview.')
+            if requested_given_by is not None and requested_given_by.pk != self.request.user.pk:
+                raise PermissionDenied('You cannot submit feedback on behalf of another user.')
 
-        if interview.status != 'completed':
-            interview.status = 'completed'
-            interview.save(update_fields=['status', 'updated_at'])
-
-        recommendation = serializer.instance.recommendation
-        if recommendation == 'reject':
-            transition_application(
-                application,
-                actor=self.request.user,
-                status='rejected',
-                stage_code=STAGE_REJECTED_CLOSED,
-                comment='Interview feedback recommendation: reject.',
-            )
-        elif recommendation == 'proceed':
-            if _all_required_plan_rounds_passed(application):
-                transition_application(
-                    application,
-                    actor=self.request.user,
-                    status='selected',
-                    stage_code=STAGE_CLIENT_APPROVED,
-                    comment='All required interview rounds passed.',
-                )
-            else:
-                transition_application(
-                    application,
-                    actor=self.request.user,
-                    status='interview_in_progress',
-                    stage_code=STAGE_INTERVIEW,
-                    comment='Interview feedback recommendation: proceed. More rounds remain.',
-                )
-        elif recommendation == 'hold':
-            transition_application(
-                application,
-                actor=self.request.user,
-                status='interview_in_progress',
-                stage_code=STAGE_INTERVIEW,
-                comment='Interview feedback recommendation: hold.',
-            )
+        given_by = requested_given_by or self.request.user
+        feedback = serializer.save(given_by=given_by)
+        apply_interview_feedback_effect(feedback, self.request.user)
 
 
 class OfferViewSet(ActionCapabilityMixin, ModelViewSet):

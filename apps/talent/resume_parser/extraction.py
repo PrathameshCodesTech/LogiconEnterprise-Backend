@@ -29,6 +29,23 @@ def extract_text(resume) -> tuple:
     except Exception as exc:
         raise ManualReviewRequired(f"Cannot open resume file: {exc}")
 
+    return extract_text_from_bytes(
+        raw_bytes,
+        content_type=content_type,
+        original_filename=original_filename,
+    )
+
+
+def extract_text_from_bytes(
+    raw_bytes: bytes,
+    *,
+    content_type: str = '',
+    original_filename: str = '',
+) -> tuple:
+    """Extract text from uploaded file bytes without requiring a Resume row."""
+    content_type = (content_type or '').lower().strip()
+    original_filename = original_filename or ''
+    ext = original_filename.rsplit('.', 1)[-1].lower() if '.' in original_filename else ''
     file_obj = BytesIO(raw_bytes)
 
     # Determine format

@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from apps.access.models import AccessRole, UserRoleAssignment
 from apps.access.tests.utils import bootstrap_role_permissions
 from apps.accounts.models import User
-from apps.core.models import Organization, ScopeNode
+from apps.core.models import Department, Organization, ScopeNode
 from apps.hiring.models import (
     ApplicationStageHistory, CandidateMatchResult, Interview, InterviewFeedback,
     HiringApplication, InterviewPlan, InterviewPlanRound, PipelineStage,
@@ -77,10 +77,15 @@ def _candidate(org, phone='9876543210', first='Alice', last='Test'):
     )
 
 
-def _mrf(org, site, user, status='approved'):
+def _mrf(
+    org, site, user, status='approved', billing_type='billable',
+    requesting_department=None, required_department=None,
+):
     return ManpowerRequest.objects.create(
         org=org, site=site, mrf_type='new_hiring',
-        billing_type='billable', status=status, requested_by=user,
+        billing_type=billing_type, status=status, requested_by=user,
+        requesting_department=requesting_department,
+        required_department=required_department,
     )
 
 
@@ -578,6 +583,58 @@ class TestHiringDemandAPI(HiringBBase):
         self.assertEqual(item['open_count'], self.mrf_li.headcount - 1)
         self.assertEqual(item['selected_count'], 1)
 
+    def test_24c_demand_exposes_hiring_lane_fields(self):
+        self._auth(self.hr_admin)
+        resp = self.api.get(f'/api/hiring/demands/?mrf={self.approved_mrf.pk}')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        item = next((r for r in resp.data['results'] if r['id'] == self.mrf_li.pk), None)
+        self.assertIsNotNone(item)
+        self.assertEqual(item['billing_type'], 'billable')
+        self.assertEqual(item['hiring_lane'], 'client_billable')
+        self.assertEqual(item['hiring_lane_label'], 'Client-site billable')
+        self.assertTrue(item['requires_client_review'])
+
+    def test_24d_demand_filters_by_hiring_lane_and_billing_type(self):
+        requesting_dept = Department.objects.create(
+            org=self.org, name='Hiring Requester', code='thb-hiring-requester',
+        )
+        required_dept = Department.objects.create(
+            org=self.org, name='Internal Operations', code='thb-internal-ops',
+        )
+        non_billable_mrf = _mrf(
+            self.org, self.site, self.hr_admin,
+            status='approved', billing_type='non_billable',
+            requesting_department=requesting_dept,
+            required_department=required_dept,
+        )
+        non_billable_li = MRFLineItem.objects.create(
+            mrf=non_billable_mrf, job_role=self.job_role, headcount=1,
+        )
+
+        self._auth(self.hr_admin)
+        resp = self.api.get('/api/hiring/demands/?hiring_lane=internal_non_billable')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        result_ids = {item['id'] for item in resp.data['results']}
+        self.assertIn(non_billable_li.pk, result_ids)
+        self.assertNotIn(self.mrf_li.pk, result_ids)
+        item = next(item for item in resp.data['results'] if item['id'] == non_billable_li.pk)
+        self.assertEqual(item['billing_type'], 'non_billable')
+        self.assertEqual(item['hiring_lane'], 'internal_non_billable')
+        self.assertEqual(item['hiring_lane_label'], 'Internal non-billable')
+        self.assertFalse(item['requires_client_review'])
+        self.assertEqual(item['requesting_department_id'], requesting_dept.pk)
+        self.assertEqual(item['requesting_department_name'], requesting_dept.name)
+        self.assertEqual(item['requesting_department_code'], requesting_dept.code)
+        self.assertEqual(item['required_department_id'], required_dept.pk)
+        self.assertEqual(item['required_department_name'], required_dept.name)
+        self.assertEqual(item['required_department_code'], required_dept.code)
+
+        resp = self.api.get('/api/hiring/demands/?billing_type=billable')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        result_ids = {item['id'] for item in resp.data['results']}
+        self.assertIn(self.mrf_li.pk, result_ids)
+        self.assertNotIn(non_billable_li.pk, result_ids)
+
     # test_25
     def test_25_demand_scope_isolation(self):
         # Create a second org with its own MRF — user from first org should not see it
@@ -692,6 +749,8 @@ class TestInterviewLifecycleAPI(HiringBBase):
             job_role=self.job_role,
             current_stage=self.stage_screening,
             status='selected',
+            client_visible=True,
+            client_decision='approved',
         )
 
     def test_31_create_interview_moves_application_to_interview_stage(self):
@@ -856,3 +915,143 @@ class TestInterviewLifecycleAPI(HiringBBase):
         app.refresh_from_db()
         self.assertEqual(app.status, 'selected')
         self.assertEqual(app.current_stage_id, approved_stage.pk)
+
+    def test_36_interview_assignments_returns_only_my_interviews_by_default(self):
+        app = self._make_app()
+        own = Interview.objects.create(
+            hiring_application=app,
+            round_type='hr',
+            round_number=1,
+            interviewer=self.hr_exec,
+            scheduled_by=self.hr_admin,
+            status='scheduled',
+        )
+        Interview.objects.create(
+            hiring_application=app,
+            round_type='technical',
+            round_number=2,
+            interviewer=self.hr_admin,
+            scheduled_by=self.hr_admin,
+            status='scheduled',
+        )
+
+        self._auth(self.hr_exec)
+        resp = self.api.get('/api/hiring/interviews/assignments/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        ids = [row['id'] for row in resp.data['results']]
+        self.assertEqual(ids, [own.pk])
+        self.assertEqual(resp.data['results'][0]['assignment_state'], 'upcoming')
+
+    def test_37_only_assigned_interviewer_can_submit_feedback_without_manage(self):
+        app = self._make_app()
+        interview = Interview.objects.create(
+            hiring_application=app,
+            round_type='hr',
+            round_number=1,
+            interviewer=self.hr_admin,
+            scheduled_by=self.hr_admin,
+            status='completed',
+        )
+
+        self._auth(self.hr_exec)
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {'interview': interview.pk, 'rating': 4, 'recommendation': 'proceed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403, resp.data)
+
+    def test_38_later_planned_round_cannot_be_scheduled_before_previous_round_passes(self):
+        app = self._make_app()
+        _stage(self.org, 'interview', order=40, stage_type='interview')
+        plan = InterviewPlan.objects.create(
+            org=self.org,
+            job_role=self.job_role,
+            name='Sequential screening',
+            code='sequential-screening',
+        )
+        hr_round = InterviewPlanRound.objects.create(plan=plan, round_type='hr', round_number=1)
+        tech_round = InterviewPlanRound.objects.create(plan=plan, round_type='technical', round_number=2)
+
+        self._auth(self.hr_admin)
+        self.api.post(
+            f'/api/hiring/applications/{app.pk}/apply-interview-plan/',
+            {'plan': plan.pk},
+            format='json',
+        )
+        tech_interview = Interview.objects.get(hiring_application=app, planned_round=tech_round)
+        resp = self.api.patch(
+            f'/api/hiring/interviews/{tech_interview.pk}/',
+            {'status': 'scheduled'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('planned_round', resp.data)
+
+        hr_interview = Interview.objects.get(hiring_application=app, planned_round=hr_round)
+        hr_interview.status = 'completed'
+        hr_interview.save(update_fields=['status'])
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {'interview': hr_interview.pk, 'rating': 4, 'recommendation': 'proceed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        resp = self.api.patch(
+            f'/api/hiring/interviews/{tech_interview.pk}/',
+            {'status': 'scheduled'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_39_offer_create_blocked_until_required_interview_rounds_pass(self):
+        app = self._make_app()
+        plan = InterviewPlan.objects.create(
+            org=self.org,
+            job_role=self.job_role,
+            name='Offer gated screening',
+            code='offer-gated-screening',
+        )
+        planned_round = InterviewPlanRound.objects.create(plan=plan, round_type='hr', round_number=1)
+        app.interview_plan = plan
+        app.status = 'selected'
+        app.save(update_fields=['interview_plan', 'status'])
+
+        self._auth(self.hr_admin)
+        resp = self.api.post(
+            '/api/hiring/offers/',
+            {
+                'hiring_application': app.pk,
+                'offered_ctc': '30000.00',
+                'joining_date': '2026-06-20',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('Cannot create offer yet', str(resp.data))
+
+        interview = Interview.objects.create(
+            hiring_application=app,
+            planned_round=planned_round,
+            round_type='hr',
+            round_number=1,
+            interviewer=self.hr_exec,
+            scheduled_by=self.hr_admin,
+            status='completed',
+        )
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {'interview': interview.pk, 'rating': 5, 'recommendation': 'proceed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        resp = self.api.post(
+            '/api/hiring/offers/',
+            {
+                'hiring_application': app.pk,
+                'offered_ctc': '30000.00',
+                'joining_date': '2026-06-20',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)

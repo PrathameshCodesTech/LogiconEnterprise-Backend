@@ -169,9 +169,9 @@ class SalesProposalClientTokenAdmin(admin.ModelAdmin):
         'is_revoked', 'created_at',
     ]
     list_filter = ['is_revoked']
-    search_fields = ['recipient_email', 'lead__client_name']
+    search_fields = ['recipient_email', 'lead__client_name', 'email_subject']
     raw_id_fields = ['proposal_version', 'lead', 'created_by']
-    readonly_fields = ['token_hash', 'created_at', 'last_accessed_at']
+    readonly_fields = ['token_hash', 'email_subject', 'email_body', 'created_at', 'last_accessed_at']
 
 
 @admin.register(ClientProposalResponse)

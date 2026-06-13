@@ -5,6 +5,7 @@ Tests for POST /api/public/submissions/
 """
 
 import json
+from unittest.mock import MagicMock, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -17,6 +18,7 @@ from apps.sites.models import Client, SiteProfile
 from apps.intake.models import (
     QRCampaign, CampaignJobRole, FormField, IntakeSubmission, IntakeDocument,
 )
+from apps.talent.models import Candidate, CandidateSkill, Resume
 
 
 def _org():
@@ -135,11 +137,69 @@ class TestPublicSubmission(TestCase):
         )
 
     def test_submission_creates_candidate_in_talent(self):
-        from apps.talent.models import Candidate
         self._post(self.valid_payload)
         self.assertTrue(
             Candidate.objects.filter(
                 org=self.org, phone_normalized='9876543210',
+            ).exists()
+        )
+
+    def test_submission_promotes_known_answers_to_candidate_profile(self):
+        email_field = FormField.objects.create(
+            campaign=self.campaign, role=None,
+            label='Email', field_key='email', field_type='email',
+            sort_order=5, is_required=False, is_active=True,
+            options=[],
+        )
+        location_field = FormField.objects.create(
+            campaign=self.campaign, role=None,
+            label='Current Location', field_key='current_location', field_type='text',
+            sort_order=6, is_required=False, is_active=True,
+            options=[],
+        )
+        skills_field = FormField.objects.create(
+            campaign=self.campaign, role=None,
+            label='Skills', field_key='skills', field_type='textarea',
+            sort_order=7, is_required=False, is_active=True,
+            options=[],
+        )
+        experience_field = FormField.objects.get(
+            campaign=self.campaign,
+            field_key='experience_years',
+        )
+        payload = dict(self.valid_payload)
+        payload['mobile_number'] = '9876543211'
+        payload['answers'] = [
+            {'field_id': self.ff_age.id, 'value': 29},
+            {'field_id': email_field.id, 'value': 'rahul.qr@example.com'},
+            {'field_id': location_field.id, 'value': 'Pune'},
+            {'field_id': experience_field.id, 'value': '4'},
+            {'field_id': skills_field.id, 'value': 'Wiring, Panel maintenance'},
+        ]
+
+        resp = self._post(payload)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        candidate = Candidate.objects.get(org=self.org, phone_normalized='9876543211')
+        self.assertEqual(candidate.source, 'qr')
+        self.assertEqual(candidate.target_job_role, self.job_role)
+        self.assertEqual(candidate.current_role, self.job_role.name)
+        self.assertEqual(candidate.email, 'rahul.qr@example.com')
+        self.assertEqual(candidate.current_location, 'Pune')
+        self.assertEqual(str(candidate.total_experience_years), '4.0')
+        self.assertTrue(candidate.source_reference.startswith('qr_campaign:'))
+        self.assertTrue(
+            CandidateSkill.objects.filter(
+                candidate=candidate,
+                normalized_skill_name='wiring',
+                source='qr_intake',
+            ).exists()
+        )
+        self.assertTrue(
+            CandidateSkill.objects.filter(
+                candidate=candidate,
+                normalized_skill_name='panel maintenance',
+                source='qr_intake',
             ).exists()
         )
 
@@ -216,12 +276,26 @@ class TestPublicSubmission(TestCase):
         payload['answers'] = json.dumps(payload['answers'])
         payload['resume'] = upload
 
-        resp = self.api.post('/api/public/submissions/', payload, format='multipart')
+        with patch('apps.talent.tasks.process_resume_task') as mock_task:
+            mock_task.delay = MagicMock()
+            resp = self.api.post('/api/public/submissions/', payload, format='multipart')
 
         self.assertEqual(resp.status_code, 201, resp.data)
         document = IntakeDocument.objects.get(submission_id=resp.data['id'])
         self.assertEqual(document.field, resume_field)
         self.assertEqual(document.document_type, 'resume')
+        candidate = Candidate.objects.get(org=self.org, phone_normalized='9000000003')
+        self.assertEqual(candidate.target_job_role, self.job_role)
+        self.assertEqual(candidate.current_role, self.job_role.name)
+        self.assertTrue(candidate.source_reference.startswith('qr_campaign:'))
+
+        resume = Resume.objects.get(source_intake_document=document)
+        self.assertEqual(resume.candidate, candidate)
+        self.assertEqual(resume.source_type, 'qr_intake')
+        self.assertEqual(resume.document_type, 'pdf')
+        self.assertEqual(resume.target_job_role, self.job_role)
+        self.assertEqual(resume.target_role_source, 'qr_intake')
+        mock_task.delay.assert_called_once_with(resume.pk)
 
     # Validation: name
 

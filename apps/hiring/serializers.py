@@ -15,6 +15,13 @@ from .models import (
     HiringApplication, Interview, InterviewFeedback, InterviewPlan, InterviewPlanRound, Offer,
     PipelineStage, ApplicationStageHistory, CandidateMatchResult,
 )
+from .lanes import (
+    hiring_lane_for_application,
+    hiring_lane_for_mrf,
+    hiring_lane_label,
+    requires_client_review_for_application,
+    requires_client_review_for_mrf,
+)
 
 
 # ─── PipelineStage ────────────────────────────────────────────────────────────
@@ -85,6 +92,10 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
     offer_status = serializers.SerializerMethodField()
     offered_ctc = serializers.SerializerMethodField()
     offer_joining_date = serializers.SerializerMethodField()
+    billing_type = serializers.SerializerMethodField()
+    hiring_lane = serializers.SerializerMethodField()
+    hiring_lane_label = serializers.SerializerMethodField()
+    requires_client_review = serializers.SerializerMethodField()
 
     class Meta:
         model = HiringApplication
@@ -92,9 +103,11 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
             'id', 'org', 'candidate', 'candidate_name', 'candidate_phone',
             'mrf', 'site', 'site_name', 'client_name',
             'job_role', 'job_role_name', 'mrf_line_item',
+            'billing_type', 'hiring_lane', 'hiring_lane_label',
+            'requires_client_review',
             'current_stage', 'current_stage_name', 'current_stage_code',
             'interview_plan',
-            'status', 'match_score',
+            'status', 'match_score', 'match_result', 'match_snapshot',
             'shortlisted_by', 'shortlisted_at',
             'client_visible', 'client_decision',
             'client_decision_by', 'client_decision_at', 'client_decision_note',
@@ -134,6 +147,18 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
             return str(jd) if jd is not None else None
         except Exception:
             return None
+
+    def get_billing_type(self, obj):
+        return obj.mrf.billing_type
+
+    def get_hiring_lane(self, obj):
+        return hiring_lane_for_application(obj)
+
+    def get_hiring_lane_label(self, obj):
+        return hiring_lane_label(hiring_lane_for_application(obj))
+
+    def get_requires_client_review(self, obj):
+        return requires_client_review_for_application(obj)
 
 
 class HiringApplicationCreateSerializer(serializers.ModelSerializer):
@@ -216,9 +241,21 @@ class HiringDemandSerializer(serializers.Serializer):
     site_name = serializers.SerializerMethodField()
     client_id = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
+    requesting_department_id = serializers.SerializerMethodField()
+    requesting_department_name = serializers.SerializerMethodField()
+    requesting_department_code = serializers.SerializerMethodField()
+    required_department_id = serializers.SerializerMethodField()
+    required_department_name = serializers.SerializerMethodField()
+    required_department_code = serializers.SerializerMethodField()
+    resolved_budget_plan_id = serializers.SerializerMethodField()
+    resolved_budget_plan_name = serializers.SerializerMethodField()
+    resolved_budget_plan_code = serializers.SerializerMethodField()
     job_role_id = serializers.IntegerField()
     job_role_name = serializers.SerializerMethodField()
     billing_type = serializers.SerializerMethodField()
+    hiring_lane = serializers.SerializerMethodField()
+    hiring_lane_label = serializers.SerializerMethodField()
+    requires_client_review = serializers.SerializerMethodField()
     requested_headcount = serializers.IntegerField(source='headcount')
 
     application_count = serializers.IntegerField()
@@ -241,11 +278,57 @@ class HiringDemandSerializer(serializers.Serializer):
             return obj.mrf.site.client.name
         return None
 
+    def get_requesting_department_id(self, obj):
+        return obj.mrf.requesting_department_id
+
+    def get_requesting_department_name(self, obj):
+        dept = obj.mrf.requesting_department
+        return dept.name if dept else None
+
+    def get_requesting_department_code(self, obj):
+        dept = obj.mrf.requesting_department
+        return dept.code if dept else None
+
+    def get_required_department_id(self, obj):
+        return obj.mrf.required_department_id
+
+    def get_required_department_name(self, obj):
+        dept = obj.mrf.required_department
+        return dept.name if dept else None
+
+    def get_required_department_code(self, obj):
+        dept = obj.mrf.required_department
+        return dept.code if dept else None
+
+    def _budget_context(self, obj):
+        if not hasattr(obj, '_hiring_demand_budget_context'):
+            from apps.mrf.services import get_resolved_budget_context
+            obj._hiring_demand_budget_context = get_resolved_budget_context(obj.mrf)
+        return obj._hiring_demand_budget_context
+
+    def get_resolved_budget_plan_id(self, obj):
+        return self._budget_context(obj)['resolved_budget_plan_id']
+
+    def get_resolved_budget_plan_name(self, obj):
+        return self._budget_context(obj)['resolved_budget_plan_name']
+
+    def get_resolved_budget_plan_code(self, obj):
+        return self._budget_context(obj)['resolved_budget_plan_code']
+
     def get_job_role_name(self, obj):
         return obj.job_role.name if obj.job_role else None
 
     def get_billing_type(self, obj):
         return obj.mrf.billing_type
+
+    def get_hiring_lane(self, obj):
+        return hiring_lane_for_mrf(obj.mrf)
+
+    def get_hiring_lane_label(self, obj):
+        return hiring_lane_label(hiring_lane_for_mrf(obj.mrf))
+
+    def get_requires_client_review(self, obj):
+        return requires_client_review_for_mrf(obj.mrf)
 
     def get_open_count(self, obj):
         filled = getattr(obj, 'offer_accepted_count', 0) or 0
@@ -266,7 +349,7 @@ class CandidateMatchResultSerializer(serializers.ModelSerializer):
             'matched_skills', 'missing_skills',
             'match_reason', 'warnings',
             'match_details',
-            'match_score',  # legacy — kept for backward compatibility
+            'match_score',  # legacy - kept for backward compatibility
             'match_source', 'is_auto_match',
             'created_by', 'created_at',
         ]
@@ -360,6 +443,62 @@ class InterviewFeedbackSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
 
+class InterviewAssignmentSerializer(serializers.ModelSerializer):
+    application = serializers.IntegerField(source='hiring_application_id', read_only=True)
+    candidate_name = serializers.CharField(
+        source='hiring_application.candidate.full_name', read_only=True,
+    )
+    candidate_phone = serializers.CharField(
+        source='hiring_application.candidate.phone', read_only=True,
+    )
+    site_name = serializers.CharField(source='hiring_application.site.name', read_only=True)
+    client_name = serializers.CharField(
+        source='hiring_application.site.client.name', read_only=True, default=None,
+    )
+    job_role_name = serializers.CharField(
+        source='hiring_application.job_role.name', read_only=True,
+    )
+    application_status = serializers.CharField(
+        source='hiring_application.status', read_only=True,
+    )
+    planned_round_name = serializers.SerializerMethodField()
+    interviewer_name = serializers.CharField(
+        source='interviewer.username', read_only=True, default=None,
+    )
+    scheduled_by_name = serializers.CharField(
+        source='scheduled_by.username', read_only=True, default=None,
+    )
+    assignment_state = serializers.CharField(read_only=True)
+    latest_feedback = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Interview
+        fields = [
+            'id', 'application', 'candidate_name', 'candidate_phone',
+            'client_name', 'site_name', 'job_role_name', 'application_status',
+            'planned_round', 'planned_round_name', 'round_type', 'round_number',
+            'scheduled_at', 'scheduled_by', 'scheduled_by_name',
+            'interviewer', 'interviewer_name', 'status', 'assignment_state',
+            'mode', 'location', 'meeting_link', 'latest_feedback',
+            'created_at', 'updated_at',
+        ]
+
+    def get_planned_round_name(self, obj):
+        if obj.planned_round_id:
+            return (
+                f"Round {obj.planned_round.round_number} "
+                f"({obj.planned_round.get_round_type_display()})"
+            )
+        return None
+
+    def get_latest_feedback(self, obj):
+        from .interview_services import latest_feedback_for_interview
+        feedback = latest_feedback_for_interview(obj)
+        if feedback is None:
+            return None
+        return InterviewFeedbackSerializer(feedback).data
+
+
 class OfferSerializer(serializers.ModelSerializer):
     released_by_username = serializers.CharField(
         source='released_by.username', read_only=True, default=None,
@@ -410,11 +549,13 @@ class OfferActionSerializer(serializers.Serializer):
 class CandidatePoolResultSerializer(serializers.Serializer):
     """Single ranked candidate entry returned by the candidate-pool endpoint."""
     candidate = serializers.SerializerMethodField()
+    match_result = serializers.IntegerField(required=False, allow_null=True)
     score = serializers.FloatField()
     match_status = serializers.CharField()
     score_breakdown = serializers.DictField()
     matched_skills = serializers.ListField(child=serializers.CharField())
     missing_skills = serializers.ListField(child=serializers.CharField())
+    extra_candidate_skills = serializers.ListField(child=serializers.CharField())
     reasons = serializers.ListField(child=serializers.CharField())
     warnings = serializers.ListField(child=serializers.CharField())
 
@@ -456,7 +597,7 @@ class ClientDecisionSerializer(serializers.Serializer):
 
 class ClientReviewApplicationSerializer(serializers.ModelSerializer):
     """
-    Client-facing read serializer. Exposes safe candidate summary only —
+    Client-facing read serializer. Exposes safe candidate summary only -
     never raw_text or cleaned_text from the resume file.
     """
     candidate_summary = serializers.SerializerMethodField()
@@ -472,6 +613,10 @@ class ClientReviewApplicationSerializer(serializers.ModelSerializer):
         source='client_decision_by.username', read_only=True, default=None,
     )
     resume_summary = serializers.SerializerMethodField()
+    billing_type = serializers.SerializerMethodField()
+    hiring_lane = serializers.SerializerMethodField()
+    hiring_lane_label = serializers.SerializerMethodField()
+    requires_client_review = serializers.SerializerMethodField()
 
     class Meta:
         model = HiringApplication
@@ -481,6 +626,8 @@ class ClientReviewApplicationSerializer(serializers.ModelSerializer):
             'mrf', 'mrf_line_item',
             'site', 'site_name', 'client_name',
             'job_role', 'job_role_name',
+            'billing_type', 'hiring_lane', 'hiring_lane_label',
+            'requires_client_review',
             'match_score',
             'status',
             'current_stage', 'current_stage_name',
@@ -509,7 +656,7 @@ class ClientReviewApplicationSerializer(serializers.ModelSerializer):
         }
 
     def get_resume_summary(self, obj):
-        """Parsed resume metadata — deliberately excludes raw_text and cleaned_text."""
+        """Parsed resume metadata - deliberately excludes raw_text and cleaned_text."""
         try:
             from apps.talent.models import ParsedResume
             parsed = (
@@ -528,3 +675,15 @@ class ClientReviewApplicationSerializer(serializers.ModelSerializer):
             }
         except Exception:
             return None
+
+    def get_billing_type(self, obj):
+        return obj.mrf.billing_type if obj.mrf else None
+
+    def get_hiring_lane(self, obj):
+        return hiring_lane_for_application(obj)
+
+    def get_hiring_lane_label(self, obj):
+        return hiring_lane_label(hiring_lane_for_application(obj))
+
+    def get_requires_client_review(self, obj):
+        return requires_client_review_for_application(obj)

@@ -101,7 +101,7 @@ def _mrf_payload(site):
     return {
         'site': site.pk,
         'mrf_type': 'new_hiring',
-        'billing_type': 'non_billable',
+        'billing_type': 'billable',
     }
 
 

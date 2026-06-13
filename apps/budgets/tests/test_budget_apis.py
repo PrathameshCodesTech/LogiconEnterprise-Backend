@@ -249,6 +249,46 @@ class TestBudgetCreate(BudgetTestBase):
         self.assertEqual(resp.data['budget_nature'], 'non_billable')
         self.assertEqual(resp.data['department'], self.dept.pk)
 
+    def test_duplicate_active_internal_hiring_budget_for_department_returns_400(self):
+        """Only one active internal hiring budget is allowed per department."""
+        self._login(self.admin_user)
+        first = _nonbillable_payload(
+            self.dept.pk,
+            code='nb-hiring-active-01',
+            status='active',
+        )
+        resp = self.api.post(URL, first, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        second = _nonbillable_payload(
+            self.dept.pk,
+            code='nb-hiring-active-02',
+            status='active',
+        )
+        resp = self.api.post(URL, second, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('internal hiring budget', str(resp.data).lower())
+
+    def test_active_internal_hiring_budget_allows_other_non_billable_budget_types(self):
+        """Department can still have non-billable budgets for non-hiring purposes."""
+        self._login(self.admin_user)
+        hiring = _nonbillable_payload(
+            self.dept.pk,
+            code='nb-hiring-active-03',
+            status='active',
+        )
+        resp = self.api.post(URL, hiring, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        operations = _nonbillable_payload(
+            self.dept.pk,
+            code='nb-ops-active-03',
+            budget_type='operations',
+            status='active',
+        )
+        resp = self.api.post(URL, operations, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+
     def test_nonbillable_with_client_returns_400(self):
         """9. non-billable with client → 400."""
         self._login(self.admin_user)

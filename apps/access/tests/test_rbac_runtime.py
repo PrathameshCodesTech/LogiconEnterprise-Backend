@@ -17,13 +17,20 @@ Scenarios:
   11. Seed command maps role permissions using Permission.code.
 """
 
+from importlib.util import module_from_spec, spec_from_file_location
 from io import StringIO
+from pathlib import Path
 
 from django.core.management import call_command
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.access.capabilities import ALL_CAPABILITIES, ROLE_CAPABILITIES, get_user_capabilities
+from apps.access.capabilities import (
+    ALL_CAPABILITIES,
+    ROLE_CAPABILITIES,
+    get_user_access_profile,
+    get_user_capabilities,
+)
 from apps.access.models import AccessRole, AccessRolePermission, Permission, UserRoleAssignment
 from apps.access.scope import user_has_capability
 from apps.access.tests.utils import bootstrap_role_permissions, get_or_create_permission
@@ -140,6 +147,98 @@ class TestDBCapabilityResolution(RBACRuntimeBase):
 
 # ─── API-level enforcement ─────────────────────────────────────────────────────
 
+class TestAccessProfileDerivation(RBACRuntimeBase):
+
+    def test_client_role_gets_client_portal_profile(self):
+        role = self._make_role('client_admin')
+        user = self._make_user('profile_client', role=role)
+
+        profile = get_user_access_profile(user)
+
+        self.assertTrue(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'client')
+        self.assertEqual(profile['nav_persona'], 'client')
+        self.assertEqual(profile['primary_role_codes'], ['client_admin'])
+
+    def test_sales_role_gets_sales_persona(self):
+        role = self._make_role('sales_manager')
+        user = self._make_user('profile_sales', role=role)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'sales')
+
+    def test_operations_role_gets_operations_persona(self):
+        role = self._make_role('operations_manager')
+        user = self._make_user('profile_ops', role=role)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'operations')
+
+    def test_finance_role_gets_finance_persona(self):
+        role = self._make_role('finance_manager')
+        user = self._make_user('profile_finance', role=role)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'finance')
+
+    def test_hr_role_gets_hr_persona(self):
+        role = self._make_role('hr_admin')
+        user = self._make_user('profile_hr', role=role)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'hr')
+
+    def test_superuser_gets_admin_persona(self):
+        user = self._make_user('profile_superuser', is_superuser=True)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'admin')
+        self.assertEqual(profile['primary_role_codes'], [])
+
+    def test_mixed_internal_roles_get_mixed_persona(self):
+        sales_role = self._make_role('sales_manager')
+        finance_role = self._make_role('finance_manager')
+        user = self._make_user('profile_mixed')
+        UserRoleAssignment.objects.create(user=user, role=sales_role, scope_node=self.n_company)
+        UserRoleAssignment.objects.create(user=user, role=finance_role, scope_node=self.n_company)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'mixed')
+        self.assertEqual(profile['primary_role_codes'], ['finance_manager', 'sales_manager'])
+
+    def test_mixed_client_and_internal_roles_get_internal_persona(self):
+        client_role = self._make_role('client_admin')
+        sales_role = self._make_role('sales_manager')
+        user = self._make_user('profile_client_internal')
+        UserRoleAssignment.objects.create(user=user, role=client_role, scope_node=self.n_company)
+        UserRoleAssignment.objects.create(user=user, role=sales_role, scope_node=self.n_company)
+
+        profile = get_user_access_profile(user)
+
+        self.assertFalse(profile['is_client_facing'])
+        self.assertEqual(profile['portal_mode'], 'internal')
+        self.assertEqual(profile['nav_persona'], 'sales')
+        self.assertEqual(profile['primary_role_codes'], ['client_admin', 'sales_manager'])
+
+
 class TestAPIEnforcementFromDB(RBACRuntimeBase):
 
     def test_me_endpoint_returns_db_capabilities(self):
@@ -153,6 +252,20 @@ class TestAPIEnforcementFromDB(RBACRuntimeBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('client.read', resp.data['capabilities'])
         self.assertNotIn('mrf.read', resp.data['capabilities'])
+
+    def test_me_endpoint_returns_access_profile(self):
+        role = self._make_role('operations_manager')
+        user = self._make_user('rbac_me_profile', role=role)
+        api = APIClient()
+        api.force_authenticate(user=user)
+
+        resp = api.get('/api/core/me/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['is_client_facing'])
+        self.assertEqual(resp.data['portal_mode'], 'internal')
+        self.assertEqual(resp.data['nav_persona'], 'operations')
+        self.assertEqual(resp.data['primary_role_codes'], ['operations_manager'])
 
     def test_has_capability_allows_from_db_permission(self):
         """Scenario 7: API endpoint gated on site.read grants access when DB row exists."""
@@ -230,12 +343,17 @@ class TestSeedCreatesPermissions(RBACRuntimeBase):
 
     def _run_seed_permissions(self):
         """Call just the permission + role_permission seeding part of seed_foundation."""
-        from apps.core.management.commands.seed_foundation import Command
+        seed_path = Path(__file__).resolve().parents[2] / 'ServerUAT' / 'seed_foundation.py'
+        spec = spec_from_file_location('_test_server_uat_seed_foundation', seed_path)
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        Command = module.Command
+
         cmd = Command()
         cmd.stdout = type('FakeStdout', (), {'write': lambda self, x: None})()
 
         roles = {}
-        for code in ('admin', 'hr_admin', 'finance', 'field_supervisor'):
+        for code in ('admin', 'hr_admin', 'finance', 'field_supervisor', 'sales_manager'):
             role, _ = AccessRole.objects.get_or_create(
                 org=self.org, code=code, defaults={'name': code}
             )
@@ -278,6 +396,53 @@ class TestSeedCreatesPermissions(RBACRuntimeBase):
             for cap in caps:
                 self.assertIn(cap, db_caps,
                               f'Role {role_code} missing DB permission for {cap}')
+
+    def test_sales_manager_preset_excludes_non_sales_workstreams(self):
+        """Sales manager should not inherit MRF/ATS/workflow/admin workstreams."""
+        sales_caps = set(ROLE_CAPABILITIES.get('sales_manager', []))
+
+        forbidden = {
+            'mrf.read',
+            'mrf.create',
+            'workflow.start_workflow',
+            'workflow.config.read',
+            'candidate.read',
+            'submission.read',
+            'department.read',
+            'user.read',
+            'site_role_requirement.read',
+            'sales_proposal.approve',
+            'sales_survey.update',
+            'sales_survey.assign',
+            'client_onboarding.read',
+        }
+        self.assertFalse(sales_caps & forbidden)
+
+    def test_seed_removes_stale_role_permissions(self):
+        """Rerunning ServerUAT foundation sync removes DB permissions no longer in the preset."""
+        roles, permissions = self._run_seed_permissions()
+        sales_role = roles['sales_manager']
+        stale_permission = permissions['mrf.read']
+
+        AccessRolePermission.objects.get_or_create(
+            role=sales_role,
+            permission=stale_permission,
+        )
+        self.assertTrue(
+            AccessRolePermission.objects.filter(
+                role=sales_role,
+                permission=stale_permission,
+            ).exists()
+        )
+
+        self._run_seed_permissions()
+
+        self.assertFalse(
+            AccessRolePermission.objects.filter(
+                role=sales_role,
+                permission=stale_permission,
+            ).exists()
+        )
 
     def test_seed_idempotent_for_permissions(self):
         """Running seed twice does not create duplicate Permission rows."""
