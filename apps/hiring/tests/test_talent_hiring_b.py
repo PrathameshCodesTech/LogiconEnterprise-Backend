@@ -112,11 +112,13 @@ class HiringBBase(TestCase):
 
         cls.r_hr_admin = _role(cls.org, 'hr_admin')
         cls.r_hr_exec = _role(cls.org, 'hr_executive')
+        cls.r_sales_manager = _role(cls.org, 'sales_manager')
         # site_supervisor has no candidate.read, resume.upload, or hiring_application.create
         cls.r_no_cand = _role(cls.org, 'site_supervisor')
 
         cls.hr_admin = _user('thb_hr_admin', cls.org, cls.r_hr_admin, cls.n_co)
         cls.hr_exec = _user('thb_hr_exec', cls.org, cls.r_hr_exec, cls.n_co)
+        cls.sales_manager = _user('thb_sales_manager', cls.org, cls.r_sales_manager, cls.n_co)
         cls.no_perm = _user('thb_no_perm', cls.org, cls.r_no_cand, cls.n_co)
         cls.superuser = _user('thb_super', cls.org, is_superuser=True)
 
@@ -941,6 +943,62 @@ class TestInterviewLifecycleAPI(HiringBBase):
         ids = [row['id'] for row in resp.data['results']]
         self.assertEqual(ids, [own.pk])
         self.assertEqual(resp.data['results'][0]['assignment_state'], 'upcoming')
+
+    def test_36b_assignment_capability_does_not_grant_full_interview_read(self):
+        app = self._make_app()
+        own = Interview.objects.create(
+            hiring_application=app,
+            round_type='commercial',
+            round_number=1,
+            interviewer=self.sales_manager,
+            scheduled_by=self.hr_admin,
+            status='scheduled',
+        )
+        Interview.objects.create(
+            hiring_application=app,
+            round_type='hr',
+            round_number=2,
+            interviewer=self.hr_exec,
+            scheduled_by=self.hr_admin,
+            status='scheduled',
+        )
+
+        self._auth(self.sales_manager)
+        resp = self.api.get('/api/hiring/interviews/')
+        self.assertEqual(resp.status_code, 403, resp.data)
+
+        resp = self.api.get('/api/hiring/interviews/assignments/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual([row['id'] for row in resp.data['results']], [own.pk])
+
+        resp = self.api.get('/api/hiring/interviews/assignments/?mine=false')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual([row['id'] for row in resp.data['results']], [own.pk])
+
+    def test_36c_assigned_non_hr_interviewer_can_submit_own_feedback(self):
+        app = self._make_app()
+        approved_stage = _stage(self.org, 'client_approved', order=30, stage_type='screening')
+        interview = Interview.objects.create(
+            hiring_application=app,
+            round_type='commercial',
+            round_number=1,
+            interviewer=self.sales_manager,
+            scheduled_by=self.hr_admin,
+            status='completed',
+        )
+
+        self._auth(self.sales_manager)
+        resp = self.api.post(
+            '/api/hiring/interview-feedbacks/',
+            {'interview': interview.pk, 'rating': 4, 'recommendation': 'proceed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        feedback = InterviewFeedback.objects.get(interview=interview)
+        self.assertEqual(feedback.given_by_id, self.sales_manager.pk)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'selected')
+        self.assertEqual(app.current_stage_id, approved_stage.pk)
 
     def test_37_only_assigned_interviewer_can_submit_feedback_without_manage(self):
         app = self._make_app()

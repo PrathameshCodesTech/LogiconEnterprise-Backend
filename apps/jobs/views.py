@@ -20,7 +20,7 @@ from .serializers import JobRoleSerializer, JobRoleWriteSerializer
 
 class JobRoleViewSet(ActionCapabilityMixin, ModelViewSet):
     permission_classes = [IsAuthenticated, HasCapability]
-    filterset_fields = ['org', 'skill_category', 'is_active']
+    filterset_fields = ['org', 'skill_category', 'hiring_lane', 'is_active']
     search_fields = ['name', 'code']
 
     action_required_capabilities = {

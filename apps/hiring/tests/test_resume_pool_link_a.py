@@ -78,6 +78,7 @@ def _candidate(org, phone, first='Alice', last='Test', lifecycle_status='active'
         first_name=first, last_name=last, source='manual',
         lifecycle_status=lifecycle_status,
         total_experience_years=experience_years,
+        hiring_lane='client_billable',
     )
 
 

@@ -5,6 +5,8 @@ GET  /api/sales/public/proposal-response/<token>/
 POST /api/sales/public/proposal-response/<token>/
 """
 
+from django.http import HttpResponse
+from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -154,3 +156,28 @@ class PublicProposalResponseView(APIView):
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(result, status=status.HTTP_200_OK)
+
+
+class PublicProposalDocumentPdfView(APIView):
+    """GET public client proposal document PDF for an active token."""
+    permission_classes = [AllowAny]
+    throttle_classes = [ProposalResponseThrottle]
+
+    def get(self, request, token):
+        from apps.sales.proposal_document import render_client_proposal_pdf
+
+        try:
+            _token_record, proposal = validate_client_proposal_token(
+                token, touch_access=True,
+            )
+            pdf = render_client_proposal_pdf(proposal)
+        except ClientProposalTokenError as exc:
+            return _token_error_response(exc)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        lead_slug = slugify(proposal.lead.client_name) or 'client'
+        filename = f'proposal-v{proposal.version_number}-{lead_slug}.pdf'
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response

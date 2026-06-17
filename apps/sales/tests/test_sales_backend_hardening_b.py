@@ -27,6 +27,8 @@ Scenarios:
   21. ClientProposalResponse serializer exposes responded_by_name, meeting_notes.
 """
 
+from decimal import Decimal
+
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -50,6 +52,7 @@ from apps.sales.models import (
 from apps.sales.services import (
     submit_to_operations, assign_survey_owner, mark_survey_started, mark_survey_completed,
     approve_sales_role_requirement,
+    generate_role_requirements_from_survey,
     generate_proposal_version,
     submit_proposal_for_internal_approval, mark_proposal_internally_approved,
     send_proposal_to_client, record_client_response, mark_lead_won_from_client_approval,
@@ -65,6 +68,7 @@ LEADS_URL = '/api/sales/leads/'
 SURVEYS_URL = '/api/sales/site-surveys/'
 ROLE_REQS_URL = '/api/sales/role-requirements/'
 PROPOSALS_URL = '/api/sales/proposal-versions/'
+BUDGET_LINES_URL = '/api/sales/proposal-budget-lines/'
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -351,16 +355,12 @@ class TestMarkSurveyCompleted(TestCase):
         )
 
     def _create_generated_requirement(self):
-        return SalesRoleRequirement.objects.create(
+        generate_role_requirements_from_survey(self.survey, self.user)
+        return SalesRoleRequirement.objects.get(
             lead=self.lead,
             site=self.site,
             survey=self.survey,
             job_role=self.job_role,
-            wage_category=self.wage_category,
-            service_category='Security',
-            manpower_count=5,
-            is_active=True,
-            created_from_survey=True,
         )
 
     def test_blocks_completion_before_role_generation(self):
@@ -508,6 +508,30 @@ class TestProposalBudgetLineRoleFk(TestCase):
         line = proposal.budget_lines.first()
         self.assertIsNotNone(line.role_requirement_id)
         self.assertEqual(line.role_requirement, self.rr)
+
+    def test_budget_line_patch_marks_sales_override_and_recalculates_total(self):
+        role = _role(self.org, 'proposal_editor', _all_sales_caps())
+        scope = _scope_node(self.org)
+        UserRoleAssignment.objects.create(user=self.user, role=role, scope_node=scope)
+        proposal = generate_proposal_version(self.lead, self.user)
+        line = proposal.budget_lines.first()
+
+        client = APIClient()
+        client.force_authenticate(self.user)
+        resp = client.patch(
+            f'{BUDGET_LINES_URL}{line.pk}/',
+            {'unit_cost': '25000.00', 'manpower_count': 3},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        line.refresh_from_db()
+        self.assertEqual(line.unit_cost, Decimal('25000.00'))
+        self.assertEqual(line.manpower_count, 3)
+        self.assertEqual(line.total_cost, Decimal('75000.00'))
+        self.assertTrue(line.is_manual_override)
+        self.assertEqual(line.overridden_by_id, self.user.pk)
+        self.assertIsNotNone(line.overridden_at)
 
 
 # ─── 13. submitted_internal_at ───────────────────────────────────────────────

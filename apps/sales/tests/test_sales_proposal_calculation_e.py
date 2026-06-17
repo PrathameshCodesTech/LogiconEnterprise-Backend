@@ -233,6 +233,28 @@ class TestProposalGeneration(TestCase):
         totals = sorted(proposal.budget_lines.values_list('total_cost', flat=True))
         self.assertNotEqual(totals[0], totals[1])
 
+    def test_proposal_uses_operations_wage_snapshot_when_present(self):
+        rr = SalesRoleRequirement.objects.filter(lead=self.lead).first()
+        rr.operational_base_wage = Decimal('15000.00')
+        rr.operational_base_wage_source = 'manual'
+        rr.operational_base_wage_overridden = True
+        rr.operational_monthly_amount = Decimal('150000.00')
+        rr.save(update_fields=[
+            'operational_base_wage',
+            'operational_base_wage_source',
+            'operational_base_wage_overridden',
+            'operational_monthly_amount',
+            'updated_at',
+        ])
+
+        proposal = generate_proposal_version(self.lead, self.user)
+        basic = proposal.breakup_lines.get(component_name='Basic')
+        budget_line = proposal.budget_lines.get(role_requirement=rr)
+
+        self.assertEqual(basic.amount, Decimal('15000.00'))
+        self.assertEqual(budget_line.source_unit_cost_origin, 'operations_snapshot')
+        self.assertEqual(budget_line.source_unit_cost, budget_line.unit_cost)
+
 
 class TestVersionSafety(TestCase):
     def setUp(self):

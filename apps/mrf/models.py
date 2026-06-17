@@ -3,9 +3,8 @@ apps/mrf/models.py
 
 ManpowerRequest (MRF) and MRFLineItem.
 
-One MRF is raised for one site but can contain multiple line items
-(one per job role). Each line item references a SiteRoleRequirement
-to validate against approved headcount limits.
+Billable MRFs are raised for a client site. Internal non-billable MRFs
+are raised against departments and do not require a site.
 """
 
 from django.conf import settings
@@ -52,6 +51,8 @@ class ManpowerRequest(TimeStampedModel):
     site = models.ForeignKey(
         'sites.SiteProfile',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='manpower_requests',
     )
     requested_by = models.ForeignKey(
@@ -206,6 +207,13 @@ class MRFLineItem(models.Model):
     class Meta:
         verbose_name = 'MRF Line Item'
         verbose_name_plural = 'MRF Line Items'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['mrf', 'site_role_requirement'],
+                condition=Q(site_role_requirement__isnull=False),
+                name='unique_mrf_line_item_per_srr',
+            ),
+        ]
 
     def __str__(self):
         return f"MRF #{self.mrf_id} - {self.job_role} x {self.headcount}"

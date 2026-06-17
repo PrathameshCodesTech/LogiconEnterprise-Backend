@@ -245,6 +245,8 @@ def filter_onboarding_requests_for_user(queryset, user):
 def filter_mrfs_for_user(queryset, user):
     """
     Filter ManpowerRequest queryset via site.scope_node path.
+    Internal non-billable MRFs may not have a site, so those are scoped to
+    the actor's own department.
     """
     if user.is_superuser:
         return queryset
@@ -253,12 +255,25 @@ def filter_mrfs_for_user(queryset, user):
         return queryset.none()
     site_q = _scope_q('site__scope_node__path', paths)
     client_q = _scope_q('site__client__scope_node__path', paths)
-    return queryset.filter(site_q | client_q).distinct()
+    org_id = getattr(user, 'org_id', None)
+    department_id = getattr(user, 'department_id', None)
+    dept_q = Q(pk__in=[])
+    if org_id and department_id:
+        dept_q = Q(
+            site__isnull=True,
+            billing_type='non_billable',
+            org_id=org_id,
+        ) & (
+            Q(requesting_department_id=department_id) |
+            Q(required_department_id=department_id)
+        )
+    return queryset.filter(site_q | client_q | dept_q).distinct()
 
 
 def filter_mrf_line_items_for_user(queryset, user):
     """
-    Filter MRFLineItem queryset via mrf.site.scope_node path.
+    Filter MRFLineItem queryset via mrf.site.scope_node path, with
+    department-owned fallback for internal non-billable MRFs.
     """
     if user.is_superuser:
         return queryset
@@ -267,7 +282,19 @@ def filter_mrf_line_items_for_user(queryset, user):
         return queryset.none()
     site_q = _scope_q('mrf__site__scope_node__path', paths)
     client_q = _scope_q('mrf__site__client__scope_node__path', paths)
-    return queryset.filter(site_q | client_q).distinct()
+    org_id = getattr(user, 'org_id', None)
+    department_id = getattr(user, 'department_id', None)
+    dept_q = Q(pk__in=[])
+    if org_id and department_id:
+        dept_q = Q(
+            mrf__site__isnull=True,
+            mrf__billing_type='non_billable',
+            mrf__org_id=org_id,
+        ) & (
+            Q(mrf__requesting_department_id=department_id) |
+            Q(mrf__required_department_id=department_id)
+        )
+    return queryset.filter(site_q | client_q | dept_q).distinct()
 
 
 def filter_budget_plans_for_user(queryset, user):
@@ -304,7 +331,8 @@ def filter_budget_plans_for_user(queryset, user):
 
 def filter_hiring_applications_for_user(queryset, user):
     """
-    Filter HiringApplication queryset via site.scope_node path.
+    Filter HiringApplication queryset via site.scope_node path, with
+    department-owned fallback for internal non-billable applications.
     """
     if user.is_superuser:
         return queryset
@@ -313,7 +341,19 @@ def filter_hiring_applications_for_user(queryset, user):
         return queryset.none()
     site_q = _scope_q('site__scope_node__path', paths)
     client_q = _scope_q('site__client__scope_node__path', paths)
-    return queryset.filter(site_q | client_q).distinct()
+    org_id = getattr(user, 'org_id', None)
+    department_id = getattr(user, 'department_id', None)
+    dept_q = Q(pk__in=[])
+    if org_id and department_id:
+        dept_q = Q(
+            site__isnull=True,
+            mrf__billing_type='non_billable',
+            org_id=org_id,
+        ) & (
+            Q(mrf__requesting_department_id=department_id) |
+            Q(mrf__required_department_id=department_id)
+        )
+    return queryset.filter(site_q | client_q | dept_q).distinct()
 
 
 def filter_site_deployments_for_user(queryset, user):
@@ -489,7 +529,19 @@ def filter_match_results_for_user(queryset, user):
         return queryset.none()
     site_q = _scope_q('mrf_line_item__mrf__site__scope_node__path', paths)
     client_q = _scope_q('mrf_line_item__mrf__site__client__scope_node__path', paths)
-    return queryset.filter(site_q | client_q).distinct()
+    org_id = getattr(user, 'org_id', None)
+    department_id = getattr(user, 'department_id', None)
+    dept_q = Q(pk__in=[])
+    if org_id and department_id:
+        dept_q = Q(
+            mrf_line_item__mrf__site__isnull=True,
+            mrf_line_item__mrf__billing_type='non_billable',
+            org_id=org_id,
+        ) & (
+            Q(mrf_line_item__mrf__requesting_department_id=department_id) |
+            Q(mrf_line_item__mrf__required_department_id=department_id)
+        )
+    return queryset.filter(site_q | client_q | dept_q).distinct()
 
 
 def filter_employees_for_user(queryset, user):

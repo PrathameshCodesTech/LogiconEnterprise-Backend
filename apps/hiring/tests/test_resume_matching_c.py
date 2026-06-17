@@ -27,7 +27,7 @@ from apps.hiring.models import (
 from apps.jobs.models import JobRole
 from apps.mrf.models import ManpowerRequest, MRFLineItem
 from apps.sites.models import Client, SiteProfile
-from apps.talent.models import Candidate, CandidateSkill, CandidateExperience
+from apps.talent.models import Candidate, CandidateSkill, CandidateExperience, Resume
 
 
 # ─── Fixture helpers ──────────────────────────────────────────────────────────
@@ -75,7 +75,8 @@ def _user(username, org, role_obj=None, scope_node=None, is_superuser=False):
 
 
 def _candidate(org, phone, first='Test', last='User', role='', location='',
-               exp_years=None, lifecycle='active', availability='available_now'):
+               exp_years=None, lifecycle='active', availability='available_now',
+               hiring_lane='client_billable'):
     return Candidate.objects.create(
         org=org, phone=phone, phone_normalized=phone,
         first_name=first, last_name=last, source='manual',
@@ -84,6 +85,7 @@ def _candidate(org, phone, first='Test', last='User', role='', location='',
         total_experience_years=Decimal(str(exp_years)) if exp_years is not None else None,
         lifecycle_status=lifecycle,
         availability_status=availability,
+        hiring_lane=hiring_lane,
     )
 
 
@@ -351,6 +353,109 @@ class TestCandidatePoolRanked(MatchingEndpointBase):
         results = resp.data.get('results', resp.data)
         candidate_ids = [r['candidate']['id'] for r in results]
         self.assertNotIn(linked.pk, candidate_ids)
+
+    def test_13b_ranked_pool_applies_resume_document_and_source_filters(self):
+        """Ranked candidate-pool respects resume document/source filters."""
+        Resume.objects.create(
+            candidate=self.cand_a,
+            original_filename='guard-a.pdf',
+            document_type='pdf',
+            source_type='bulk_upload',
+            status='indexed',
+        )
+        Resume.objects.create(
+            candidate=self.cand_b,
+            original_filename='chef-b.docx',
+            document_type='docx',
+            source_type='manual_upload',
+            status='indexed',
+        )
+
+        self._auth(self.superuser)
+        resp = self.api.get(
+            self._pool_url(),
+            {'document_type': 'pdf', 'source_type': 'bulk_upload'},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        results = resp.data.get('results', resp.data)
+        candidate_ids = [r['candidate']['id'] for r in results]
+        self.assertIn(self.cand_a.pk, candidate_ids)
+        self.assertNotIn(self.cand_b.pk, candidate_ids)
+        self.assertIn('score', results[0])
+        self.assertIsNotNone(results[0].get('match_result'))
+
+    def test_13c_ranked_pool_applies_target_role_search_and_availability_filters(self):
+        """Demand pool uses the same persisted candidate filters as resume pool."""
+        other_role = JobRole.objects.create(
+            org=self.org, name='Chef', code='chef-mep',
+        )
+        self.cand_a.target_job_role = self.job_role
+        self.cand_a.preferred_location = 'Navi Mumbai'
+        self.cand_a.save()
+        self.cand_b.target_job_role = other_role
+        self.cand_b.availability_status = 'notice_period'
+        self.cand_b.save()
+
+        self._auth(self.superuser)
+        resp = self.api.get(
+            self._pool_url(),
+            {
+                'target_job_role': self.job_role.pk,
+                'availability_status': 'available_now',
+                'search': '4444444441',
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        results = resp.data.get('results', resp.data)
+        candidate_ids = [r['candidate']['id'] for r in results]
+        self.assertEqual(candidate_ids, [self.cand_a.pk])
+        self.assertIn('score_breakdown', results[0])
+
+    def test_13d_ranked_pool_applies_journey_status_filter_before_scoring(self):
+        """Journey status filters candidate-pool without losing scorecard output."""
+        stage = PipelineStage.objects.filter(org=self.org).first()
+        other_demand = MRFLineItem.objects.create(
+            mrf=self.mrf, job_role=self.job_role, headcount=1,
+        )
+        HiringApplication.objects.create(
+            org=self.org,
+            candidate=self.cand_b,
+            mrf=self.mrf,
+            mrf_line_item=other_demand,
+            site=self.site,
+            job_role=self.job_role,
+            current_stage=stage,
+            status='shortlisted',
+        )
+
+        self._auth(self.superuser)
+        resp = self.api.get(self._pool_url(), {'journey_status': 'shortlisted'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        results = resp.data.get('results', resp.data)
+        candidate_ids = [r['candidate']['id'] for r in results]
+        self.assertIn(self.cand_b.pk, candidate_ids)
+        self.assertNotIn(self.cand_a.pk, candidate_ids)
+        self.assertIn('match_status', results[0])
+
+    def test_13e_ranked_pool_defaults_to_demand_hiring_lane(self):
+        """Billable demands do not return internal non-billable candidates."""
+        internal_candidate = _candidate(
+            self.org,
+            '4444444499',
+            role='Guard',
+            location='Mumbai',
+            exp_years=4,
+            hiring_lane='internal_non_billable',
+        )
+        _skill(internal_candidate, 'security')
+
+        self._auth(self.superuser)
+        resp = self.api.get(self._pool_url())
+        self.assertEqual(resp.status_code, 200, resp.data)
+        results = resp.data.get('results', resp.data)
+        candidate_ids = [r['candidate']['id'] for r in results]
+        self.assertIn(self.cand_a.pk, candidate_ids)
+        self.assertNotIn(internal_candidate.pk, candidate_ids)
 
 
 class TestCandidatePoolFlat(MatchingEndpointBase):

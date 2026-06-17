@@ -44,6 +44,7 @@ from apps.sales.models import (
     SiteSurveyLocationLine,
     SiteSurveyScopeAnswer,
     SiteSurveyShiftDeployment,
+    SurveyRoleMapping,
 )
 from apps.sales.proposal_calculation import (
     RULE_KINDS,
@@ -355,7 +356,12 @@ class TestStructuredApi(TestCase):
         cls.scope_node = _scope(cls.org)
         cls.user = _user(
             'sapi_user', cls.org,
-            caps=[SALES_SURVEY_READ, SALES_SURVEY_UPDATE, SALES_LEAD_READ],
+            caps=[
+                SALES_SURVEY_READ,
+                SALES_SURVEY_UPDATE,
+                SALES_LEAD_READ,
+                SALES_PROPOSAL_READ,
+            ],
             scope_node=cls.scope_node,
         )
 
@@ -368,9 +374,11 @@ class TestStructuredApi(TestCase):
         seed_default_survey_lines(self.survey)
         r = self.api.get(f'/api/sales/site-surveys/{self.survey.pk}/structured/')
         self.assertEqual(r.status_code, http_status.HTTP_200_OK)
-        for key in ('survey', 'scope_answers', 'shift_deployments',
+        for key in ('survey', 'site_context', 'scope_answers', 'shift_deployments',
                     'location_lines', 'equipment_lines', 'issue_lines'):
             self.assertIn(key, r.data)
+        self.assertEqual(r.data['site_context']['id'], self.survey.site_id)
+        self.assertEqual(r.data['site_context']['site_name'], self.survey.site.site_name)
         self.assertEqual(len(r.data['shift_deployments']), len(SHIFT_DEPLOYMENT_ROWS))
         self.assertEqual(len(r.data['location_lines']), len(LOCATION_ROWS))
         self.assertEqual(
@@ -410,6 +418,223 @@ class TestStructuredApi(TestCase):
             data={}, format='json',
         )
         self.assertEqual(r.status_code, http_status.HTTP_403_FORBIDDEN)
+
+    def test_refresh_deployment_assumptions_resolves_wage_snapshot(self):
+        location = ensure_location_area_mumbai()
+        self.survey.site.location_area = location
+        self.survey.site.save(update_fields=['location_area', 'updated_at'])
+        wage_category = ensure_wage_category(code='skilled', name='Skilled')
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Electrician',
+            code='electrician',
+            skill_category=wage_category.code,
+            is_active=True,
+        )
+        ensure_minimum_wage(
+            self.org,
+            location,
+            wage_category,
+            role,
+            monthly_wage=19000,
+        )
+        row = SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            job_role=role,
+            description='Electrician',
+            general_count=Decimal('1.00'),
+            first_shift_count=Decimal('2.00'),
+            reliever_count=Decimal('1.00'),
+            line_type='item',
+            sort_order=1,
+        )
+
+        r = self.api.post(
+            f'/api/sales/site-surveys/{self.survey.pk}/refresh-deployment-assumptions/',
+            data={}, format='json',
+        )
+
+        self.assertEqual(r.status_code, http_status.HTTP_200_OK, r.data)
+        self.assertEqual(r.data['summary']['updated'], 1)
+        self.assertEqual(r.data['summary']['errors'], 0)
+        row.refresh_from_db()
+        self.assertEqual(row.total_count, Decimal('4.00'))
+        self.assertEqual(row.base_wage, Decimal('19000.00'))
+        self.assertEqual(row.base_wage_source, 'wage_master')
+        self.assertEqual(row.monthly_amount, Decimal('76000.00'))
+
+    def test_refresh_deployment_assumptions_uses_existing_role_mapping(self):
+        location = ensure_location_area_mumbai()
+        self.survey.site.location_area = location
+        self.survey.site.save(update_fields=['location_area', 'updated_at'])
+        wage_category = ensure_wage_category(code='skilled', name='Skilled')
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Electrician',
+            code='electrician',
+            skill_category=wage_category.code,
+            is_active=True,
+        )
+        ensure_minimum_wage(
+            self.org,
+            location,
+            wage_category,
+            role,
+            monthly_wage=19000,
+        )
+        SurveyRoleMapping.objects.create(
+            org=self.org,
+            description_text='Electrician',
+            job_role=role,
+            wage_category=wage_category,
+            shift_hours=Decimal('8.0'),
+            working_days=Decimal('26.0'),
+            is_active=True,
+        )
+        row = SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            description='Electrician',
+            general_count=Decimal('1.00'),
+            first_shift_count=Decimal('1.00'),
+            second_shift_count=Decimal('1.00'),
+            night_shift_count=Decimal('1.00'),
+            reliever_count=Decimal('1.00'),
+            line_type='item',
+            sort_order=1,
+        )
+
+        r = self.api.post(
+            f'/api/sales/site-surveys/{self.survey.pk}/refresh-deployment-assumptions/',
+            data={}, format='json',
+        )
+
+        self.assertEqual(r.status_code, http_status.HTTP_200_OK, r.data)
+        self.assertEqual(r.data['summary']['errors'], 0)
+        row.refresh_from_db()
+        self.assertEqual(row.job_role_id, role.pk)
+        self.assertEqual(row.shift_hours, Decimal('8.0'))
+        self.assertEqual(row.working_days, Decimal('26.0'))
+        self.assertEqual(row.total_count, Decimal('5.00'))
+        self.assertEqual(row.base_wage, Decimal('19000.00'))
+        self.assertEqual(row.monthly_amount, Decimal('95000.00'))
+
+    def test_commercial_preview_uses_generated_role_requirements(self):
+        seed_default_proposal_component_rules(org=self.org)
+        location = ensure_location_area_mumbai()
+        self.survey.site.location_area = location
+        self.survey.site.save(update_fields=['location_area', 'updated_at'])
+        wage_category = ensure_wage_category(code='skilled', name='Skilled')
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Electrician',
+            code='electrician',
+            skill_category=wage_category.code,
+            is_active=True,
+        )
+        ensure_minimum_wage(
+            self.org,
+            location,
+            wage_category,
+            role,
+            monthly_wage=19000,
+        )
+        SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            job_role=role,
+            description='Electrician',
+            general_count=Decimal('1.00'),
+            first_shift_count=Decimal('1.00'),
+            line_type='item',
+            sort_order=1,
+        )
+        self.api.post(
+            f'/api/sales/site-surveys/{self.survey.pk}/refresh-deployment-assumptions/',
+            data={}, format='json',
+        )
+        generated = self.api.post(
+            f'/api/sales/site-surveys/{self.survey.pk}/generate-role-requirements/',
+            data={}, format='json',
+        )
+        self.assertEqual(generated.status_code, http_status.HTTP_200_OK, generated.data)
+        self.survey.status = 'completed'
+        self.survey.save(update_fields=['status', 'updated_at'])
+
+        r = self.api.get(f'/api/sales/site-surveys/{self.survey.pk}/commercial-preview/')
+
+        self.assertEqual(r.status_code, http_status.HTTP_200_OK, r.data)
+        self.assertTrue(r.data['ready'])
+        self.assertTrue(r.data['can_generate_proposal'])
+        self.assertEqual(len(r.data['rows']), 1)
+        row = r.data['rows'][0]
+        self.assertEqual(row['job_role_name'], 'Electrician')
+        self.assertEqual(row['headcount'], 2)
+        self.assertEqual(row['operational_base_wage'], '19000.00')
+        self.assertEqual(row['source_unit_cost_origin'], 'operations_snapshot')
+        self.assertGreater(Decimal(row['unit_cost']), Decimal('19000.00'))
+        self.assertEqual(r.data['totals']['manpower_total'], 2)
+        self.assertGreater(Decimal(r.data['totals']['grand_total']), Decimal('0.00'))
+
+    def test_commercial_preview_requires_generated_role_requirements(self):
+        seed_default_proposal_component_rules(org=self.org)
+        self.survey.status = 'completed'
+        self.survey.save(update_fields=['status', 'updated_at'])
+
+        r = self.api.get(f'/api/sales/site-surveys/{self.survey.pk}/commercial-preview/')
+
+        self.assertEqual(r.status_code, http_status.HTTP_200_OK, r.data)
+        self.assertFalse(r.data['ready'])
+        self.assertEqual(r.data['rows'], [])
+        self.assertEqual(r.data['errors'][0]['code'], 'role_requirements_missing')
+
+    def test_commercial_preview_blocks_stale_generated_requirements(self):
+        seed_default_proposal_component_rules(org=self.org)
+        location = ensure_location_area_mumbai()
+        self.survey.site.location_area = location
+        self.survey.site.save(update_fields=['location_area', 'updated_at'])
+        wage_category = ensure_wage_category(code='skilled', name='Skilled')
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Electrician',
+            code='electrician',
+            skill_category=wage_category.code,
+            is_active=True,
+        )
+        ensure_minimum_wage(
+            self.org,
+            location,
+            wage_category,
+            role,
+            monthly_wage=19000,
+        )
+        deployment = SiteSurveyShiftDeployment.objects.create(
+            survey=self.survey,
+            job_role=role,
+            description='Electrician',
+            general_count=Decimal('1.00'),
+            line_type='item',
+            sort_order=1,
+        )
+        self.api.post(
+            f'/api/sales/site-surveys/{self.survey.pk}/refresh-deployment-assumptions/',
+            data={}, format='json',
+        )
+        generated = self.api.post(
+            f'/api/sales/site-surveys/{self.survey.pk}/generate-role-requirements/',
+            data={}, format='json',
+        )
+        self.assertEqual(generated.status_code, http_status.HTTP_200_OK, generated.data)
+        deployment.general_count = Decimal('2.00')
+        deployment.save(update_fields=['general_count', 'updated_at'])
+        self.survey.status = 'completed'
+        self.survey.save(update_fields=['status', 'updated_at'])
+
+        r = self.api.get(f'/api/sales/site-surveys/{self.survey.pk}/commercial-preview/')
+
+        self.assertEqual(r.status_code, http_status.HTTP_200_OK, r.data)
+        self.assertFalse(r.data['ready'])
+        self.assertEqual(r.data['rows'], [])
+        self.assertEqual(r.data['errors'][0]['code'], 'role_requirement_stale')
+        self.assertIn('general_count_changed', r.data['errors'][0]['reasons'])
 
 
 # ─── Group 4: org scoping ─────────────────────────────────────────────────────

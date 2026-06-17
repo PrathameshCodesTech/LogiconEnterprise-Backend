@@ -673,6 +673,42 @@ class TestGenerateRoleRequirementsFromSurvey(TestCase):
         self.assertEqual(srr.working_days, Decimal('26.0'))
         self.assertTrue(srr.created_from_survey)
 
+    def test_generated_srr_carries_operations_commercial_snapshot(self):
+        row = SiteSurveyShiftDeployment.objects.get(
+            survey=self.survey,
+            description='Electrician',
+        )
+        row.reliever_count = Decimal('1.00')
+        row.base_wage = Decimal('19000.00')
+        row.base_wage_overridden = True
+        row.base_wage_source = 'manual'
+        row.base_wage_override_reason = 'Remote site allowance.'
+        row.total_count = Decimal('0.00')
+        row.save(update_fields=[
+            'reliever_count',
+            'base_wage',
+            'base_wage_overridden',
+            'base_wage_source',
+            'base_wage_override_reason',
+            'total_count',
+            'updated_at',
+        ])
+
+        generate_role_requirements_from_survey(self.survey, self.user)
+
+        srr = SalesRoleRequirement.objects.get(
+            survey=self.survey, job_role=self.electrician,
+        )
+        row.refresh_from_db()
+        self.assertEqual(row.total_count, Decimal('3.00'))
+        self.assertEqual(row.monthly_amount, Decimal('57000.00'))
+        self.assertEqual(srr.source_shift_deployment_id, row.pk)
+        self.assertEqual(srr.manpower_count, 3)
+        self.assertEqual(srr.reliever_count, Decimal('1.00'))
+        self.assertEqual(srr.operational_base_wage, Decimal('19000.00'))
+        self.assertTrue(srr.operational_base_wage_overridden)
+        self.assertEqual(srr.operational_monthly_amount, Decimal('57000.00'))
+
     def test_falls_back_to_shift_sum_when_total_count_zero(self):
         """When total_count == 0, headcount uses general+first+second."""
         SiteSurveyShiftDeployment.objects.create(

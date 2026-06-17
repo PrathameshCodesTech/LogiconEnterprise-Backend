@@ -83,6 +83,7 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
         'org', 'source', 'is_blacklisted',
         'lifecycle_status', 'availability_status',
         'is_duplicate', 'do_not_contact', 'target_job_role',
+        'hiring_lane',
     ]
     search_fields = [
         'first_name', 'last_name', 'phone', 'email',
@@ -121,6 +122,14 @@ class CandidateViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQueryse
             qs = qs.filter(
                 Q(target_job_role_id=target_role) |
                 Q(resumes__target_job_role_id=target_role)
+            ).distinct()
+
+        hiring_lane = self.request.query_params.get('hiring_lane', '').strip()
+        if hiring_lane:
+            qs = qs.filter(
+                Q(hiring_lane=hiring_lane) |
+                Q(resumes__hiring_lane=hiring_lane) |
+                Q(resume_import_items__batch__hiring_lane=hiring_lane)
             ).distinct()
 
         document_type = self.request.query_params.get('document_type', '').strip().lower()
@@ -277,6 +286,7 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
     filterset_fields = [
         'candidate', 'parsed_status', 'status', 'source_type',
         'target_job_role', 'target_role_source', 'import_batch_id',
+        'hiring_lane',
         'document_type',
     ]
 
@@ -308,11 +318,17 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
             file_hash=compute_file_hash(f),
             status='uploaded',
             uploaded_by=self.request.user,
+            hiring_lane=serializer.validated_data.get('hiring_lane') or '',
         )
         target_role = serializer.validated_data.get('target_job_role')
         if target_role and not candidate.target_job_role_id:
             Candidate.objects.filter(pk=candidate.pk, target_job_role__isnull=True).update(
                 target_job_role=target_role,
+            )
+        hiring_lane = serializer.validated_data.get('hiring_lane')
+        if hiring_lane and not candidate.hiring_lane:
+            Candidate.objects.filter(pk=candidate.pk, hiring_lane='').update(
+                hiring_lane=hiring_lane,
             )
         from .services import queue_resume_processing
         queue_resume_processing(serializer.instance)
@@ -330,6 +346,7 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
             request.user,
             ser.validated_data['files'],
             ser.validated_data['target_job_role'],
+            ser.validated_data['hiring_lane'],
             ser.validated_data.get('source_type') or 'bulk_upload',
             ser.validated_data.get('view_only_note') or '',
         )
@@ -355,6 +372,9 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
         source_type = request.query_params.get('source_type', '').strip()
         if source_type:
             qs = qs.filter(source_type=source_type)
+        hiring_lane = request.query_params.get('hiring_lane', '').strip()
+        if hiring_lane:
+            qs = qs.filter(hiring_lane=hiring_lane)
         created_by = request.query_params.get('created_by', '').strip()
         if created_by:
             qs = qs.filter(created_by_id=created_by)
@@ -417,6 +437,7 @@ class ResumeViewSet(ReadAfterWriteMixin, ActionCapabilityMixin, ScopedQuerysetMi
             request.user,
             ser.validated_data['file'],
             default_target_job_role=ser.validated_data.get('target_job_role'),
+            hiring_lane=ser.validated_data['hiring_lane'],
             source_type=ser.validated_data.get('source_type') or 'excel_import',
         )
         return Response(result, status=http_status.HTTP_201_CREATED)

@@ -20,11 +20,22 @@ class JobRole(TimeStampedModel):
         ('supervisor', 'Supervisor'),
     ]
 
+    HIRING_LANE_CHOICES = [
+        ('client_billable', 'Client site manpower'),
+        ('internal_non_billable', 'Internal staff hiring'),
+    ]
+
     org = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='job_roles')
     name = models.CharField(max_length=128)
     code = models.CharField(max_length=64)
     description = models.TextField(blank=True)
     skill_category = models.CharField(max_length=32, choices=SKILL_CATEGORY_CHOICES)
+    hiring_lane = models.CharField(
+        max_length=32,
+        choices=HIRING_LANE_CHOICES,
+        default='client_billable',
+        db_index=True,
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:

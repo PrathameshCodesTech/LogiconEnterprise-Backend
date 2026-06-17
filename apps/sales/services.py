@@ -4,10 +4,19 @@ apps/sales/services.py
 Sales lead lifecycle transitions and proposal generation/versioning.
 """
 
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.db import transaction
 from django.utils import timezone
 
 from apps.sales.activity import log_sales_activity
+
+
+MONEY_QUANT = Decimal('0.01')
+
+
+def money(value):
+    return Decimal(value or 0).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
 
 
 # ─── Lead Transition Services ─────────────────────────────────────────────────
@@ -257,6 +266,20 @@ def _validate_survey_can_be_completed(survey):
         if mapping is None:
             missing.append(row.description)
             continue
+        row = _prepare_shift_row_operational_snapshot(row, survey, mapping)
+        mapping.source_shift_deployment_id = row.pk
+        mapping.general_count = row.general_count
+        mapping.first_shift_count = row.first_shift_count
+        mapping.second_shift_count = row.second_shift_count
+        mapping.night_shift_count = row.night_shift_count
+        mapping.reliever_count = getattr(row, 'reliever_count', 0)
+        mapping.shift_hours = row.shift_hours
+        mapping.working_days = row.working_days
+        mapping.operational_base_wage = row.base_wage
+        mapping.operational_base_wage_source = row.base_wage_source
+        mapping.operational_base_wage_overridden = row.base_wage_overridden
+        mapping.operational_base_wage_override_reason = row.base_wage_override_reason
+        mapping.operational_monthly_amount = row.monthly_amount
         exists = SalesRoleRequirement.objects.filter(
             lead=survey.lead,
             site=survey.site,
@@ -1299,6 +1322,8 @@ def clone_proposal_for_revision(proposal, user):
             manpower_count=line.manpower_count,
             unit_cost=line.unit_cost,
             total_cost=line.total_cost,
+            source_unit_cost=line.source_unit_cost,
+            source_unit_cost_origin=line.source_unit_cost_origin,
             remarks=line.remarks,
             sort_order=line.sort_order,
             is_manual_override=line.is_manual_override,
@@ -1618,6 +1643,55 @@ def _resolve_survey_role_defaults(org, row):
     return mapping, None
 
 
+def resolve_survey_deployment_wage_snapshot(
+    *, survey, job_role, wage_category=None, working_days=None,
+):
+    """
+    Resolve the wage basis visible to operations for a survey deployment row.
+
+    This returns a snapshot amount, not a live dependency. Proposal generation
+    should use the copied snapshot so later wage-master edits do not rewrite
+    already-captured survey assumptions.
+    """
+    if survey is None or job_role is None:
+        return None, ''
+
+    if wage_category is None:
+        from apps.wages.models import WageCategory
+
+        wage_category = WageCategory.objects.filter(
+            code=getattr(job_role, 'skill_category', '') or '',
+        ).first()
+    if wage_category is None:
+        return None, ''
+
+    from apps.wages.services import get_applicable_minimum_wage
+
+    site = survey.site
+    rate = get_applicable_minimum_wage(
+        wage_category=wage_category,
+        on_date=timezone.now().date(),
+        location=getattr(site, 'location_area', None),
+        state=getattr(site, 'state', None),
+        city=getattr(site, 'city', None),
+        role=job_role,
+        org=survey.lead.org if survey.lead_id else None,
+    )
+    if rate is None:
+        return None, ''
+
+    monthly_wage = Decimal(rate.monthly_wage or 0)
+    if monthly_wage > 0:
+        return money(monthly_wage), 'wage_master'
+
+    daily_wage = Decimal(rate.daily_wage or 0)
+    if daily_wage > 0:
+        days = Decimal(working_days or 26)
+        return money(daily_wage * days), 'wage_master_daily'
+
+    return None, ''
+
+
 def _headcount_for_shift_row(row):
     """Prefer total_count; fall back to the sum of all shift buckets."""
     total = int(row.total_count or 0)
@@ -1628,8 +1702,192 @@ def _headcount_for_shift_row(row):
         + int(row.first_shift_count or 0)
         + int(row.second_shift_count or 0)
         + int(getattr(row, 'night_shift_count', 0) or 0)
+        + int(getattr(row, 'reliever_count', 0) or 0)
     )
     return sum_shifts
+
+
+def _prepare_shift_row_operational_snapshot(row, survey, mapping):
+    """
+    Ensure generated requirements receive a complete operational snapshot.
+    Existing manual survey values are preserved; missing defaults are resolved
+    from mapping and wage master.
+    """
+    changed_fields = []
+
+    if row.shift_hours is None and mapping.shift_hours is not None:
+        row.shift_hours = mapping.shift_hours
+        changed_fields.append('shift_hours')
+    if row.working_days is None and mapping.working_days is not None:
+        row.working_days = mapping.working_days
+        changed_fields.append('working_days')
+
+    if not row.base_wage_overridden and not row.base_wage:
+        base_wage, wage_source = resolve_survey_deployment_wage_snapshot(
+            survey=survey,
+            job_role=mapping.job_role,
+            wage_category=mapping.wage_category,
+            working_days=row.working_days,
+        )
+        if base_wage is not None:
+            row.base_wage = base_wage
+            row.base_wage_source = wage_source
+            changed_fields.extend(['base_wage', 'base_wage_source'])
+
+    total_count = (
+        Decimal(row.general_count or 0)
+        + Decimal(row.first_shift_count or 0)
+        + Decimal(row.second_shift_count or 0)
+        + Decimal(getattr(row, 'night_shift_count', 0) or 0)
+        + Decimal(getattr(row, 'reliever_count', 0) or 0)
+    )
+    current_total = Decimal(row.total_count or 0)
+    if current_total <= 0 or total_count > current_total:
+        row.total_count = total_count
+        changed_fields.append('total_count')
+
+    monthly_amount = money(Decimal(row.total_count or 0) * Decimal(row.base_wage or 0))
+    if monthly_amount != Decimal(row.monthly_amount or 0):
+        row.monthly_amount = monthly_amount
+        changed_fields.append('monthly_amount')
+
+    if changed_fields:
+        row.save(update_fields=[*set(changed_fields), 'updated_at'])
+
+    return row
+
+
+def refresh_survey_deployment_commercial_assumptions(survey):
+    """
+    Refresh calculated operational assumptions for survey deployment rows.
+
+    This is used before the frontend renders the operations survey and before
+    commercial handoff checks. Manual base wage overrides are preserved.
+    """
+    updated = []
+    skipped = []
+    errors = []
+
+    rows = (
+        survey.shift_deployments
+        .select_related('job_role')
+        .order_by('sort_order', 'id')
+    )
+
+    for row in rows:
+        if not row.is_applicable:
+            skipped.append({
+                'id': row.pk,
+                'description': row.description,
+                'reason': 'not_applicable',
+            })
+            continue
+        if row.line_type != 'item':
+            skipped.append({
+                'id': row.pk,
+                'description': row.description,
+                'reason': 'aggregate_row',
+            })
+            continue
+
+        mapping, error_reason = _resolve_survey_role_defaults(survey.lead.org, row)
+        if mapping is None:
+            code = 'role_required'
+            message = 'Map this deployment row to a job role before wage can be resolved.'
+            if error_reason == 'wage_category_not_found':
+                code = 'wage_category_not_found'
+                message = 'Wage category is not configured for this role skill category.'
+            errors.append({
+                'id': row.pk,
+                'description': row.description,
+                'code': code,
+                'message': message,
+            })
+            continue
+
+        changed_fields = []
+        job_role = mapping.job_role
+        wage_category = mapping.wage_category
+
+        if row.job_role_id != job_role.pk:
+            row.job_role = job_role
+            changed_fields.append('job_role')
+        if row.shift_hours is None and mapping.shift_hours is not None:
+            row.shift_hours = mapping.shift_hours
+            changed_fields.append('shift_hours')
+        if row.working_days is None and mapping.working_days is not None:
+            row.working_days = mapping.working_days
+            changed_fields.append('working_days')
+
+        total_count = (
+            Decimal(row.general_count or 0)
+            + Decimal(row.first_shift_count or 0)
+            + Decimal(row.second_shift_count or 0)
+            + Decimal(getattr(row, 'night_shift_count', 0) or 0)
+            + Decimal(getattr(row, 'reliever_count', 0) or 0)
+        )
+        if Decimal(row.total_count or 0) != total_count:
+            row.total_count = total_count
+            changed_fields.append('total_count')
+
+        if not row.base_wage_overridden:
+            base_wage, wage_source = resolve_survey_deployment_wage_snapshot(
+                survey=survey,
+                job_role=job_role,
+                wage_category=wage_category,
+                working_days=row.working_days,
+            )
+            if base_wage is None:
+                errors.append({
+                    'id': row.pk,
+                    'description': row.description,
+                    'job_role': job_role.pk,
+                    'job_role_name': job_role.name,
+                    'code': 'wage_not_found',
+                    'message': 'No active wage rate is configured for this site, role, and wage category.',
+                })
+            else:
+                if Decimal(row.base_wage or 0) != Decimal(base_wage):
+                    row.base_wage = base_wage
+                    changed_fields.append('base_wage')
+                if (row.base_wage_source or '') != (wage_source or ''):
+                    row.base_wage_source = wage_source or ''
+                    changed_fields.append('base_wage_source')
+
+        monthly_amount = money(Decimal(row.total_count or 0) * Decimal(row.base_wage or 0))
+        if Decimal(row.monthly_amount or 0) != monthly_amount:
+            row.monthly_amount = monthly_amount
+            changed_fields.append('monthly_amount')
+
+        if changed_fields:
+            row.save(update_fields=[*dict.fromkeys(changed_fields), 'updated_at'])
+            updated.append({
+                'id': row.pk,
+                'description': row.description,
+                'job_role': job_role.pk,
+                'job_role_name': job_role.name,
+                'fields': sorted(set(changed_fields)),
+                'base_wage': str(row.base_wage) if row.base_wage is not None else None,
+                'base_wage_source': row.base_wage_source,
+                'monthly_amount': str(row.monthly_amount),
+            })
+        else:
+            skipped.append({
+                'id': row.pk,
+                'description': row.description,
+                'reason': 'already_current',
+            })
+
+    return {
+        'updated': updated,
+        'skipped': skipped,
+        'errors': errors,
+        'summary': {
+            'updated': len(updated),
+            'skipped': len(skipped),
+            'errors': len(errors),
+        },
+    }
 
 
 def _role_requirement_needs_sync(role_requirement, survey, mapping, headcount):
@@ -1637,11 +1895,22 @@ def _role_requirement_needs_sync(role_requirement, survey, mapping, headcount):
         role_requirement.lead_id != survey.lead_id,
         role_requirement.site_id != survey.site_id,
         role_requirement.survey_id != survey.id,
+        role_requirement.source_shift_deployment_id != getattr(mapping, 'source_shift_deployment_id', None),
         role_requirement.wage_category_id != mapping.wage_category_id,
         (role_requirement.service_category or '') != (mapping.service_category or ''),
         role_requirement.manpower_count != headcount,
+        role_requirement.general_count != getattr(mapping, 'general_count', 0),
+        role_requirement.first_shift_count != getattr(mapping, 'first_shift_count', 0),
+        role_requirement.second_shift_count != getattr(mapping, 'second_shift_count', 0),
+        role_requirement.night_shift_count != getattr(mapping, 'night_shift_count', 0),
+        role_requirement.reliever_count != getattr(mapping, 'reliever_count', 0),
         role_requirement.shift_hours != mapping.shift_hours,
         role_requirement.working_days != mapping.working_days,
+        role_requirement.operational_base_wage != getattr(mapping, 'operational_base_wage', None),
+        (role_requirement.operational_base_wage_source or '') != getattr(mapping, 'operational_base_wage_source', ''),
+        role_requirement.operational_base_wage_overridden != getattr(mapping, 'operational_base_wage_overridden', False),
+        (role_requirement.operational_base_wage_override_reason or '') != getattr(mapping, 'operational_base_wage_override_reason', ''),
+        role_requirement.operational_monthly_amount != getattr(mapping, 'operational_monthly_amount', 0),
         role_requirement.is_active is not True,
         role_requirement.created_from_survey is not True,
     ))
@@ -1649,25 +1918,282 @@ def _role_requirement_needs_sync(role_requirement, survey, mapping, headcount):
 
 def _sync_generated_role_requirement(role_requirement, survey, mapping, headcount):
     role_requirement.site = survey.site
+    role_requirement.source_shift_deployment_id = getattr(mapping, 'source_shift_deployment_id', None)
     role_requirement.wage_category = mapping.wage_category
     role_requirement.service_category = mapping.service_category
     role_requirement.manpower_count = headcount
+    role_requirement.general_count = getattr(mapping, 'general_count', 0)
+    role_requirement.first_shift_count = getattr(mapping, 'first_shift_count', 0)
+    role_requirement.second_shift_count = getattr(mapping, 'second_shift_count', 0)
+    role_requirement.night_shift_count = getattr(mapping, 'night_shift_count', 0)
+    role_requirement.reliever_count = getattr(mapping, 'reliever_count', 0)
     role_requirement.shift_hours = mapping.shift_hours
     role_requirement.working_days = mapping.working_days
+    role_requirement.operational_base_wage = getattr(mapping, 'operational_base_wage', None)
+    role_requirement.operational_base_wage_source = getattr(mapping, 'operational_base_wage_source', '')
+    role_requirement.operational_base_wage_overridden = getattr(
+        mapping, 'operational_base_wage_overridden', False,
+    )
+    role_requirement.operational_base_wage_override_reason = getattr(
+        mapping, 'operational_base_wage_override_reason', '',
+    )
+    role_requirement.operational_monthly_amount = getattr(mapping, 'operational_monthly_amount', 0)
     role_requirement.is_active = True
     role_requirement.created_from_survey = True
     role_requirement.save(update_fields=[
         'site',
+        'source_shift_deployment',
         'wage_category',
         'service_category',
         'manpower_count',
+        'general_count',
+        'first_shift_count',
+        'second_shift_count',
+        'night_shift_count',
+        'reliever_count',
         'shift_hours',
         'working_days',
+        'operational_base_wage',
+        'operational_base_wage_source',
+        'operational_base_wage_overridden',
+        'operational_base_wage_override_reason',
+        'operational_monthly_amount',
         'is_active',
         'created_from_survey',
         'updated_at',
     ])
     return role_requirement
+
+
+def _decimal_string(value):
+    if value is None:
+        return None
+    return str(money(value))
+
+
+def _requirement_stale_reasons(role_requirement):
+    row = role_requirement.source_shift_deployment
+    if row is None:
+        return []
+
+    reasons = []
+    if row.survey_id != role_requirement.survey_id:
+        reasons.append('source_row_survey_mismatch')
+    if not row.is_applicable:
+        reasons.append('source_row_not_applicable')
+    if _headcount_for_shift_row(row) != role_requirement.manpower_count:
+        reasons.append('headcount_changed')
+
+    comparisons = (
+        ('general_count', row.general_count, role_requirement.general_count),
+        ('first_shift_count', row.first_shift_count, role_requirement.first_shift_count),
+        ('second_shift_count', row.second_shift_count, role_requirement.second_shift_count),
+        ('night_shift_count', row.night_shift_count, role_requirement.night_shift_count),
+        ('reliever_count', getattr(row, 'reliever_count', 0), role_requirement.reliever_count),
+        ('shift_hours', row.shift_hours, role_requirement.shift_hours),
+        ('working_days', row.working_days, role_requirement.working_days),
+        ('base_wage', row.base_wage, role_requirement.operational_base_wage),
+        ('base_wage_source', row.base_wage_source, role_requirement.operational_base_wage_source),
+        (
+            'base_wage_overridden',
+            row.base_wage_overridden,
+            role_requirement.operational_base_wage_overridden,
+        ),
+        (
+            'base_wage_override_reason',
+            row.base_wage_override_reason or '',
+            role_requirement.operational_base_wage_override_reason or '',
+        ),
+        ('monthly_amount', row.monthly_amount, role_requirement.operational_monthly_amount),
+    )
+    for field, source_value, requirement_value in comparisons:
+        if source_value != requirement_value:
+            reasons.append(f'{field}_changed')
+    return reasons
+
+
+def build_survey_commercial_preview(survey):
+    """
+    Build a read-only commercial preview from generated survey role requirements.
+
+    This intentionally reuses the proposal calculation path, but does not create
+    ProposalVersion, ProposalBudgetLine, or ProposalBreakupLine rows.
+    """
+    from apps.sales.models import SalesRoleRequirement
+    from apps.sales.proposal_calculation import (
+        DEFAULT_MANAGEMENT_FEE_PERCENT,
+        ProposalComponentRulesNotConfigured,
+        _load_required_org_component_ruleset,
+        build_salary_breakup,
+        calculate_gst,
+        calculate_management_fee,
+        calculate_role_unit_cost,
+        get_pricing_wage_basis_for_requirement,
+    )
+
+    errors = []
+    warnings = []
+
+    if survey.status != 'completed':
+        errors.append({
+            'code': 'survey_not_completed',
+            'message': 'Complete the operations survey before previewing commercials.',
+        })
+
+    requirements = list(
+        SalesRoleRequirement.objects.filter(
+            lead=survey.lead,
+            site=survey.site,
+            survey=survey,
+            is_active=True,
+            manpower_count__gt=0,
+        )
+        .select_related(
+            'job_role',
+            'site',
+            'site__location_area',
+            'wage_category',
+            'lead__org',
+            'source_shift_deployment',
+        )
+        .order_by('job_role__name', 'id')
+    )
+    if not requirements:
+        errors.append({
+            'code': 'role_requirements_missing',
+            'message': 'Generate role requirements from the completed survey before previewing commercials.',
+        })
+
+    for req in requirements:
+        stale_reasons = _requirement_stale_reasons(req)
+        if stale_reasons:
+            errors.append({
+                'code': 'role_requirement_stale',
+                'sales_role_requirement_id': req.pk,
+                'job_role_id': req.job_role_id,
+                'job_role_name': req.job_role.name if req.job_role_id else '',
+                'message': (
+                    f"Role requirement for {req.job_role.name} is not up to date. "
+                    'Regenerate role requirements before previewing commercials.'
+                ),
+                'reasons': stale_reasons,
+            })
+
+    ruleset = None
+    if not errors:
+        try:
+            ruleset = _load_required_org_component_ruleset(survey.lead.org, timezone.now().date())
+        except ProposalComponentRulesNotConfigured as exc:
+            errors.append({
+                'code': 'component_rules_missing',
+                'message': str(exc),
+                'missing_codes': list(exc.missing_codes),
+            })
+
+    rows = []
+    subtotal = money(0)
+    manpower_total = 0
+
+    if not errors:
+        for req in requirements:
+            try:
+                wage_rate = get_pricing_wage_basis_for_requirement(req)
+                breakup_data = build_salary_breakup(req, wage_rate, ruleset=ruleset)
+                unit_cost = calculate_role_unit_cost(req, breakup_data)
+            except ValueError as exc:
+                errors.append({
+                    'code': 'calculation_failed',
+                    'sales_role_requirement_id': req.pk,
+                    'job_role_id': req.job_role_id,
+                    'job_role_name': req.job_role.name if req.job_role_id else '',
+                    'message': str(exc),
+                })
+                continue
+
+            total_cost = money(unit_cost * req.manpower_count)
+            subtotal += total_cost
+            manpower_total += req.manpower_count
+            rows.append({
+                'sales_role_requirement_id': req.pk,
+                'site_id': req.site_id,
+                'site_name': req.site.site_name if req.site_id else '',
+                'job_role_id': req.job_role_id,
+                'job_role_name': req.job_role.name if req.job_role_id else '',
+                'job_role_code': req.job_role.code if req.job_role_id else '',
+                'wage_category_id': req.wage_category_id,
+                'wage_category_name': req.wage_category.name if req.wage_category_id else '',
+                'headcount': req.manpower_count,
+                'general_count': _decimal_string(req.general_count),
+                'first_shift_count': _decimal_string(req.first_shift_count),
+                'second_shift_count': _decimal_string(req.second_shift_count),
+                'night_shift_count': _decimal_string(req.night_shift_count),
+                'reliever_count': _decimal_string(req.reliever_count),
+                'shift_hours': str(req.shift_hours) if req.shift_hours is not None else None,
+                'working_days': str(req.working_days) if req.working_days is not None else None,
+                'operational_base_wage': _decimal_string(req.operational_base_wage),
+                'operational_base_wage_source': req.operational_base_wage_source,
+                'operational_base_wage_overridden': req.operational_base_wage_overridden,
+                'operational_base_wage_override_reason': req.operational_base_wage_override_reason,
+                'operational_monthly_amount': _decimal_string(req.operational_monthly_amount),
+                'source_unit_cost': _decimal_string(unit_cost),
+                'source_unit_cost_origin': (
+                    'operations_snapshot'
+                    if Decimal(req.operational_base_wage or 0) > 0
+                    else 'wage_master'
+                ),
+                'unit_cost': _decimal_string(unit_cost),
+                'total_cost': _decimal_string(total_cost),
+                'components': [
+                    {
+                        'component_name': line['component_name'],
+                        'component_type': line['component_type'],
+                        'percentage': _decimal_string(line.get('percentage')),
+                        'amount': _decimal_string(line['amount']),
+                        'sort_order': line['sort_order'],
+                    }
+                    for line in breakup_data
+                ],
+            })
+
+    management_fee_percent = DEFAULT_MANAGEMENT_FEE_PERCENT
+    management_fee_amount = calculate_management_fee(subtotal, management_fee_percent)
+    gst_applicable = False
+    gst_amount = calculate_gst(subtotal + management_fee_amount, gst_applicable)
+    grand_total = money(subtotal + management_fee_amount + gst_amount)
+
+    return {
+        'ready': not errors,
+        'can_generate_proposal': not errors,
+        'survey': {
+            'id': survey.pk,
+            'status': survey.status,
+            'lead': survey.lead_id,
+            'site': survey.site_id,
+        },
+        'lead': {
+            'id': survey.lead_id,
+            'client_name': survey.lead.client_name,
+            'current_stage': survey.lead.current_stage,
+        },
+        'site': {
+            'id': survey.site_id,
+            'site_name': survey.site.site_name if survey.site_id else '',
+            'city': survey.site.city if survey.site_id else '',
+            'state': survey.site.state if survey.site_id else '',
+        },
+        'rows': [] if errors else rows,
+        'totals': {
+            'manpower_total': manpower_total if not errors else 0,
+            'subtotal_amount': _decimal_string(subtotal if not errors else 0),
+            'management_fee_percent': _decimal_string(management_fee_percent),
+            'management_fee_amount': _decimal_string(management_fee_amount if not errors else 0),
+            'gst_applicable': gst_applicable,
+            'gst_amount': _decimal_string(gst_amount if not errors else 0),
+            'grand_total': _decimal_string(grand_total if not errors else 0),
+        },
+        'errors': errors,
+        'warnings': warnings,
+    }
 
 
 @transaction.atomic
@@ -1729,6 +2255,20 @@ def generate_role_requirements_from_survey(survey, actor):
                 'reason': error_reason,
             })
             continue
+        row = _prepare_shift_row_operational_snapshot(row, survey, mapping)
+        mapping.source_shift_deployment_id = row.pk
+        mapping.general_count = row.general_count
+        mapping.first_shift_count = row.first_shift_count
+        mapping.second_shift_count = row.second_shift_count
+        mapping.night_shift_count = row.night_shift_count
+        mapping.reliever_count = getattr(row, 'reliever_count', 0)
+        mapping.shift_hours = row.shift_hours
+        mapping.working_days = row.working_days
+        mapping.operational_base_wage = row.base_wage
+        mapping.operational_base_wage_source = row.base_wage_source
+        mapping.operational_base_wage_overridden = row.base_wage_overridden
+        mapping.operational_base_wage_override_reason = row.base_wage_override_reason
+        mapping.operational_monthly_amount = row.monthly_amount
         job_role = mapping.job_role
 
         headcount = _headcount_for_shift_row(row)
@@ -1767,11 +2307,22 @@ def generate_role_requirements_from_survey(survey, actor):
             site=survey.site,
             survey=survey,
             job_role=job_role,
+            source_shift_deployment=row,
             wage_category=mapping.wage_category,
             service_category=mapping.service_category,
             manpower_count=headcount,
+            general_count=row.general_count,
+            first_shift_count=row.first_shift_count,
+            second_shift_count=row.second_shift_count,
+            night_shift_count=row.night_shift_count,
+            reliever_count=getattr(row, 'reliever_count', 0),
             shift_hours=mapping.shift_hours,
             working_days=mapping.working_days,
+            operational_base_wage=row.base_wage,
+            operational_base_wage_source=row.base_wage_source,
+            operational_base_wage_overridden=row.base_wage_overridden,
+            operational_base_wage_override_reason=row.base_wage_override_reason,
+            operational_monthly_amount=row.monthly_amount,
             is_active=True,
             created_from_survey=True,
         )

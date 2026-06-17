@@ -252,6 +252,14 @@ class MRFLineItemWriteSerializer(serializers.ModelSerializer):
         srr = data.get('site_role_requirement', instance.site_role_requirement if instance else None)
 
         if mrf and srr:
+            duplicate_qs = MRFLineItem.objects.filter(mrf=mrf, site_role_requirement=srr)
+            if instance is not None:
+                duplicate_qs = duplicate_qs.exclude(pk=instance.pk)
+            if duplicate_qs.exists():
+                raise serializers.ValidationError({
+                    'site_role_requirement': 'This approved role is already added to this MRF.'
+                })
+
             # site_role_requirement.site must match MRF.site
             if srr.site_id != mrf.site_id:
                 raise serializers.ValidationError({
@@ -653,6 +661,7 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             'support_requirement',
         ]
         extra_kwargs = {
+            'site': {'required': False, 'allow_null': True},
             'mrf_type': {'required': False},
             'billing_type': {'required': False},
             'budget_plan': {'required': False, 'allow_null': True},
@@ -710,7 +719,7 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             data['required_department'] = None
             data['department'] = ''
 
-        site = data.get('site') or (instance.site if instance else None)
+        site = data.get('site', instance.site if instance else None)
         requesting_department = data.get(
             'requesting_department',
             instance.requesting_department if instance else None,
@@ -753,11 +762,42 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             errors['billing_type'] = 'billing_type is required.'
 
         if not client_requested and billing_type == 'non_billable':
-            if requesting_department is None and request is not None:
-                user_department = getattr(request.user, 'department', None)
-                if user_department is not None:
+            data['site'] = None
+            site = None
+            user_department = getattr(request.user, 'department', None) if request is not None else None
+            if request is not None and not request.user.is_superuser:
+                if user_department is None:
+                    errors['requesting_department'] = (
+                        'Your user account is not assigned to a department.'
+                    )
+                    errors['required_department'] = (
+                        'Your user account is not assigned to a department.'
+                    )
+                else:
+                    if (
+                        requesting_department is not None
+                        and requesting_department.pk != user_department.pk
+                    ):
+                        errors['requesting_department'] = (
+                            'Internal MRFs can only be raised from your own department.'
+                        )
+                    if (
+                        required_department is not None
+                        and required_department.pk != user_department.pk
+                    ):
+                        errors['required_department'] = (
+                            'Internal MRFs can only request manpower for your own department.'
+                        )
                     data['requesting_department'] = user_department
+                    data['required_department'] = user_department
                     requesting_department = user_department
+                    required_department = user_department
+            elif requesting_department is None and user_department is not None:
+                data['requesting_department'] = user_department
+                requesting_department = user_department
+            if required_department is None and user_department is not None:
+                data['required_department'] = user_department
+                required_department = user_department
             if requesting_department is None:
                 errors['requesting_department'] = (
                     'requesting_department is required for non-billable MRFs.'
@@ -766,6 +806,24 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
                 errors['required_department'] = (
                     'required_department is required for non-billable MRFs.'
                 )
+            org = (
+                getattr(request.user, 'org', None)
+                if request is not None else (instance.org if instance else None)
+            )
+            self._validate_internal_department(
+                requesting_department,
+                org,
+                'requesting_department',
+                errors,
+            )
+            self._validate_internal_department(
+                required_department,
+                org,
+                'required_department',
+                errors,
+            )
+        elif billing_type == 'billable' and site is None:
+            errors['site'] = 'site is required for billable MRFs.'
 
         # ── request_number uniqueness (belt-and-suspenders over DB constraint) ─
         request_number = data.get(
@@ -773,7 +831,10 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             instance.request_number if instance else '',
         )
         if request_number:
-            org = site.org if site else (instance.org if instance else None)
+            org = site.org if site else (
+                getattr(request.user, 'org', None)
+                if request is not None else (instance.org if instance else None)
+            )
             if org:
                 qs = ManpowerRequest.objects.filter(
                     org=org, request_number=request_number,
@@ -805,13 +866,17 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             budget_plan = data.get('budget_plan') or (
                 instance.budget_plan if instance and instance.budget_plan_id else None
             )
-            if budget_plan is not None and site is not None:
+            org = site.org if site else (
+                getattr(request.user, 'org', None)
+                if request is not None else (instance.org if instance else None)
+            )
+            if budget_plan is not None and org is not None:
                 billing_type = data.get('billing_type') or (instance.billing_type if instance else None)
                 if billing_type:
                     dept_ids = [required_department.pk] if required_department else []
                     errors.update(validate_budget_plan_for_context(
                         budget_plan,
-                        org=site.org,
+                        org=org,
                         billing_type=billing_type,
                         site=site if billing_type == 'billable' else None,
                         department_ids=dept_ids if billing_type == 'non_billable' else None,
@@ -859,3 +924,14 @@ class ManpowerRequestWriteSerializer(serializers.ModelSerializer):
             and department.client_id != site.client_id
         ):
             errors[field_name] = 'Department belongs to a different client.'
+
+    @staticmethod
+    def _validate_internal_department(department, org, field_name, errors):
+        """Internal non-billable MRF departments must be active org-level departments."""
+        if department is None or org is None or field_name in errors:
+            return
+        if department.org_id != org.pk:
+            errors[field_name] = 'Department must belong to your organization.'
+            return
+        if department.client_id is not None or department.site_id is not None:
+            errors[field_name] = 'Internal MRFs must use an org-level department.'

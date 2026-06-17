@@ -21,6 +21,7 @@ from apps.access.capabilities import (
     PIPELINE_STAGE_READ, CANDIDATE_MATCH_READ, MRF_READ,
     DEPLOYMENT_CREATE, EMPLOYEE_CREATE, SITE_DEPLOYMENT_CREATE,
     INTERVIEW_READ, INTERVIEW_CREATE, INTERVIEW_MANAGE,
+    INTERVIEW_ASSIGNMENT_READ, INTERVIEW_FEEDBACK_CREATE,
     OFFER_READ, OFFER_CREATE, OFFER_UPDATE, OFFER_APPROVE, OFFER_MANAGE,
     get_user_capabilities, is_client_facing_user,
 )
@@ -87,6 +88,7 @@ from .interview_services import (
 from .lanes import (
     LANE_CLIENT_BILLABLE,
     LANE_INTERNAL_NON_BILLABLE,
+    hiring_lane_for_mrf,
     requires_client_review_for_application,
     requires_client_review_for_mrf,
 )
@@ -722,8 +724,11 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
         Returns candidates eligible for this demand.
         ?ranked=true (default): scored + ranked via matching engine.
         ?ranked=false: flat-filtered list (legacy behaviour).
-        Ranked supports: skills, min_experience, max_experience, location,
-                         min_score, save_results (default true).
+        Ranked supports deterministic pool filters plus score controls:
+        search, skills, min_experience, max_experience, location,
+        document_type, source_type, source, target_job_role,
+        availability_status, journey_status, min_score,
+        save_results (default true).
         """
         demand = self.get_object()
         org_id = demand.mrf.org_id
@@ -742,6 +747,7 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
             do_not_contact=False,
             lifecycle_status__in=['active', 'available'],
         ).exclude(id__in=linked_candidate_ids).distinct()
+        base_qs = self._apply_candidate_pool_filters(base_qs, request)
 
         ranked_param = request.query_params.get('ranked', 'true').strip().lower()
         if ranked_param == 'false':
@@ -804,6 +810,118 @@ class HiringDemandViewSet(ReadOnlyModelViewSet):
                 CandidatePoolResultSerializer(page, many=True, context=ctx).data
             )
         return Response(CandidatePoolResultSerializer(results, many=True, context=ctx).data)
+
+    def _apply_candidate_pool_filters(self, qs, request):
+        """
+        Apply deterministic resume-pool filters before demand-specific ranking.
+
+        This mirrors the main CandidateViewSet filter semantics where practical,
+        while keeping candidate-pool responsible for scorecards and match_result
+        creation.
+        """
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(phone_normalized__icontains=search) |
+                Q(email__icontains=search) |
+                Q(current_role__icontains=search) |
+                Q(current_location__icontains=search) |
+                Q(preferred_location__icontains=search)
+            )
+
+        target_role = request.query_params.get('target_job_role', '').strip()
+        if target_role:
+            qs = qs.filter(
+                Q(target_job_role_id=target_role) |
+                Q(resumes__target_job_role_id=target_role)
+            )
+
+        document_type = request.query_params.get('document_type', '').strip().lower()
+        if document_type:
+            if document_type in {'pdf', 'docx', 'doc', 'txt'}:
+                qs = qs.filter(resumes__document_type=document_type)
+            elif document_type in {'xlsx', 'csv'}:
+                qs = qs.filter(
+                    resume_import_items__document_type=document_type,
+                    resume_import_items__batch__source_type='excel_import',
+                )
+            else:
+                qs = qs.filter(
+                    Q(resumes__document_type=document_type) |
+                    Q(resume_import_items__document_type=document_type)
+                )
+
+        source = request.query_params.get('source', '').strip()
+        if source:
+            qs = qs.filter(source=source)
+
+        source_type = request.query_params.get('source_type', '').strip()
+        if source_type:
+            qs = qs.filter(
+                Q(resumes__source_type=source_type) |
+                Q(resume_import_items__batch__source_type=source_type)
+            )
+
+        explicit_hiring_lane = request.query_params.get('hiring_lane', '').strip()
+        hiring_lane = explicit_hiring_lane or hiring_lane_for_mrf(self.get_object().mrf)
+        if hiring_lane:
+            qs = qs.filter(
+                Q(hiring_lane=hiring_lane) |
+                Q(resumes__hiring_lane=hiring_lane) |
+                Q(resume_import_items__batch__hiring_lane=hiring_lane)
+            )
+
+        availability_status = request.query_params.get('availability_status', '').strip()
+        if availability_status:
+            qs = qs.filter(availability_status=availability_status)
+
+        location = request.query_params.get('location', '').strip()
+        if location:
+            qs = qs.filter(
+                Q(current_location__icontains=location) |
+                Q(preferred_location__icontains=location)
+            )
+
+        skill = (
+            request.query_params.get('skills', '') or
+            request.query_params.get('skill', '')
+        ).strip()
+        if skill:
+            terms = [s.strip().lower() for s in skill.split(',') if s.strip()]
+            if terms:
+                skill_q = Q()
+                for term in terms:
+                    skill_q |= Q(skills__normalized_skill_name__icontains=term)
+                qs = qs.filter(skill_q)
+
+        min_exp = request.query_params.get('min_experience', '').strip()
+        if min_exp:
+            try:
+                qs = qs.filter(total_experience_years__gte=Decimal(min_exp))
+            except InvalidOperation:
+                pass
+
+        max_exp = request.query_params.get('max_experience', '').strip()
+        if max_exp:
+            try:
+                qs = qs.filter(total_experience_years__lte=Decimal(max_exp))
+            except InvalidOperation:
+                pass
+
+        journey_status = request.query_params.get('journey_status', '').strip()
+        if journey_status:
+            from apps.talent.services import candidate_journey_status
+            candidate_ids = []
+            for candidate in qs:
+                journey = candidate_journey_status(candidate)
+                if journey.get('journey_status') == journey_status:
+                    candidate_ids.append(candidate.pk)
+            qs = qs.model.objects.filter(pk__in=candidate_ids)
+
+        return qs.distinct()
 
     @action(detail=True, methods=['post'], url_path='send-shortlisted-to-client-review')
     def send_shortlisted_to_client_review(self, request, pk=None):
@@ -1017,7 +1135,7 @@ class InterviewViewSet(ActionCapabilityMixin, ModelViewSet):
         'retrieve': INTERVIEW_READ,
         'create': INTERVIEW_CREATE,
         'partial_update': INTERVIEW_MANAGE,
-        'assignments': INTERVIEW_READ,
+        'assignments': INTERVIEW_ASSIGNMENT_READ,
     }
 
     def get_queryset(self):
@@ -1030,7 +1148,20 @@ class InterviewViewSet(ActionCapabilityMixin, ModelViewSet):
             return qs.none()
         site_q = _scope_q('hiring_application__site__scope_node__path', paths)
         client_q = _scope_q('hiring_application__site__client__scope_node__path', paths)
-        return qs.filter(site_q | client_q).distinct()
+        org_id = getattr(user, 'org_id', None)
+        department_id = getattr(user, 'department_id', None)
+        dept_q = Q(pk__in=[])
+        if org_id and department_id:
+            dept_q = Q(
+                hiring_application__site__isnull=True,
+                hiring_application__mrf__billing_type='non_billable',
+                hiring_application__org_id=org_id,
+            ) & (
+                Q(hiring_application__mrf__requesting_department_id=department_id) |
+                Q(hiring_application__mrf__required_department_id=department_id)
+            )
+        own_q = Q(interviewer=user, hiring_application__org_id=org_id) if org_id else Q(pk__in=[])
+        return qs.filter(site_q | client_q | dept_q | own_q).distinct()
 
     filterset_fields = ['hiring_application', 'round_type', 'status', 'mode', 'interviewer']
 
@@ -1143,7 +1274,7 @@ class InterviewFeedbackViewSet(ActionCapabilityMixin, ModelViewSet):
     action_required_capabilities = {
         'list': INTERVIEW_READ,
         'retrieve': INTERVIEW_READ,
-        'create': INTERVIEW_CREATE,
+        'create': INTERVIEW_FEEDBACK_CREATE,
         'partial_update': INTERVIEW_MANAGE,
     }
 
@@ -1157,7 +1288,23 @@ class InterviewFeedbackViewSet(ActionCapabilityMixin, ModelViewSet):
             return qs.none()
         site_q = _scope_q('interview__hiring_application__site__scope_node__path', paths)
         client_q = _scope_q('interview__hiring_application__site__client__scope_node__path', paths)
-        return qs.filter(site_q | client_q).distinct()
+        org_id = getattr(user, 'org_id', None)
+        department_id = getattr(user, 'department_id', None)
+        dept_q = Q(pk__in=[])
+        if org_id and department_id:
+            dept_q = Q(
+                interview__hiring_application__site__isnull=True,
+                interview__hiring_application__mrf__billing_type='non_billable',
+                interview__hiring_application__org_id=org_id,
+            ) & (
+                Q(interview__hiring_application__mrf__requesting_department_id=department_id) |
+                Q(interview__hiring_application__mrf__required_department_id=department_id)
+            )
+        own_q = (
+            Q(interview__interviewer=user, interview__hiring_application__org_id=org_id) |
+            Q(given_by=user, interview__hiring_application__org_id=org_id)
+        ) if org_id else Q(pk__in=[])
+        return qs.filter(site_q | client_q | dept_q | own_q).distinct()
 
     filterset_fields = ['interview', 'recommendation', 'given_by']
 
@@ -1218,7 +1365,19 @@ class OfferViewSet(ActionCapabilityMixin, ModelViewSet):
             return qs.none()
         site_q = _scope_q('hiring_application__site__scope_node__path', paths)
         client_q = _scope_q('hiring_application__site__client__scope_node__path', paths)
-        return qs.filter(site_q | client_q).distinct()
+        org_id = getattr(user, 'org_id', None)
+        department_id = getattr(user, 'department_id', None)
+        dept_q = Q(pk__in=[])
+        if org_id and department_id:
+            dept_q = Q(
+                hiring_application__site__isnull=True,
+                hiring_application__mrf__billing_type='non_billable',
+                hiring_application__org_id=org_id,
+            ) & (
+                Q(hiring_application__mrf__requesting_department_id=department_id) |
+                Q(hiring_application__mrf__required_department_id=department_id)
+            )
+        return qs.filter(site_q | client_q | dept_q).distinct()
 
     def get_serializer_class(self):
         if self.action == 'create':

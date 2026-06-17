@@ -24,6 +24,7 @@ PERMISSION_ACTION_CHOICES = [
     ('export', 'Export'),
     ('view_resume', 'View Resume'),
     ('shortlist', 'Shortlist'),
+    ('access', 'Access'),
 ]
 
 PERMISSION_RESOURCE_CHOICES = [
@@ -54,6 +55,7 @@ PERMISSION_RESOURCE_CHOICES = [
     ('report', 'Report'),
     ('field_tracking', 'Field Tracking'),
     ('client_onboarding', 'Client Onboarding'),
+    ('asset_vault', 'Asset Vault'),
 ]
 
 

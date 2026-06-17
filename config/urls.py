@@ -9,6 +9,7 @@ from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from apps.accounts.views import EmailTokenObtainPairView
+from apps.core.asset_vault import AssetVaultLoginLinkView
 
 urlpatterns = [
     # Django Admin
@@ -17,6 +18,11 @@ urlpatterns = [
     # JWT Authentication (email + password)
     path('api/token/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path(
+        'api/integrations/asset-vault/login-link/',
+        AssetVaultLoginLinkView.as_view(),
+        name='asset_vault_login_link',
+    ),
 
     # App APIs
     path('api/accounts/', include('apps.accounts.urls')),

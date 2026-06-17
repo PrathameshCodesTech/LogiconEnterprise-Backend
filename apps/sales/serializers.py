@@ -4,7 +4,7 @@ apps/sales/serializers.py
 Read/write serializers for all sales app models.
 """
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from rest_framework import serializers
 
@@ -27,6 +27,7 @@ _ALLOWED_CONTENT_TYPES = {
     'image/png',
 }
 _MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB
+_MONEY_QUANT = Decimal('0.01')
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -122,7 +123,15 @@ class SalesRoleRequirementSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'lead', 'site', 'site_name', 'survey',
             'job_role', 'job_role_name', 'wage_category', 'wage_category_name',
-            'service_category', 'manpower_count', 'shift_hours', 'working_days',
+            'service_category', 'manpower_count',
+            'source_shift_deployment',
+            'general_count', 'first_shift_count', 'second_shift_count',
+            'night_shift_count', 'reliever_count',
+            'shift_hours', 'working_days',
+            'operational_base_wage', 'operational_base_wage_source',
+            'operational_base_wage_overridden',
+            'operational_base_wage_override_reason',
+            'operational_monthly_amount',
             'remarks', 'is_active',
             'created_from_survey', 'approved_by_operations', 'approved_at',
             'approved_by', 'approved_by_name',
@@ -153,7 +162,15 @@ class SalesRoleRequirementWriteSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'lead', 'site', 'survey',
             'job_role', 'wage_category',
-            'service_category', 'manpower_count', 'shift_hours', 'working_days',
+            'service_category', 'manpower_count',
+            'source_shift_deployment',
+            'general_count', 'first_shift_count', 'second_shift_count',
+            'night_shift_count', 'reliever_count',
+            'shift_hours', 'working_days',
+            'operational_base_wage', 'operational_base_wage_source',
+            'operational_base_wage_overridden',
+            'operational_base_wage_override_reason',
+            'operational_monthly_amount',
             'remarks', 'is_active', 'created_from_survey',
         ]
         read_only_fields = ['id']
@@ -172,6 +189,7 @@ class ProposalBudgetLineSerializer(serializers.ModelSerializer):
             'id', 'proposal_version', 'site', 'site_name', 'role_requirement',
             'service_category', 'job_role', 'job_role_name',
             'description', 'manpower_count', 'unit_cost', 'total_cost',
+            'source_unit_cost', 'source_unit_cost_origin',
             'remarks', 'sort_order',
             'is_manual_override', 'override_reason',
             'overridden_by', 'overridden_by_name', 'overridden_at',
@@ -199,10 +217,11 @@ class ProposalBudgetLineWriteSerializer(serializers.ModelSerializer):
             'id', 'proposal_version', 'site', 'role_requirement',
             'service_category', 'job_role',
             'description', 'manpower_count', 'unit_cost', 'total_cost',
+            'source_unit_cost', 'source_unit_cost_origin',
             'remarks', 'sort_order',
             'is_manual_override', 'override_reason', 'overridden_by', 'overridden_at',
         ]
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'source_unit_cost', 'source_unit_cost_origin']
 
 
 # ─── ProposalBreakupLine ──────────────────────────────────────────────────────
@@ -602,13 +621,18 @@ class SiteSurveyShiftDeploymentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'survey', 'job_role', 'job_role_name', 'job_role_code', 'description',
             'general_count', 'first_shift_count', 'second_shift_count',
-            'night_shift_count', 'total_count',
+            'night_shift_count', 'reliever_count', 'total_count',
+            'shift_hours', 'working_days',
+            'base_wage', 'base_wage_source',
+            'base_wage_overridden', 'base_wage_override_reason',
+            'monthly_amount',
             'remarks', 'is_applicable', 'not_applicable_reason',
             'line_type', 'sort_order',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'id', 'job_role_name', 'job_role_code', 'total_count',
+            'id', 'job_role_name', 'job_role_code',
+            'total_count', 'base_wage_source', 'monthly_amount',
             'created_at', 'updated_at',
         ]
         validators = []
@@ -650,7 +674,14 @@ class SiteSurveyShiftDeploymentSerializer(serializers.ModelSerializer):
             return Decimal('0')
         return Decimal(str(value))
 
-    def _apply_calculated_total(self, attrs):
+    def _has_base_wage_override(self, attrs):
+        if 'base_wage' not in attrs:
+            return self.instance.base_wage_overridden if self.instance is not None else False
+        if attrs.get('base_wage_overridden') is not None:
+            return attrs.get('base_wage_overridden')
+        return True
+
+    def _apply_calculated_values(self, attrs):
         source = self.instance
 
         def count_for(field):
@@ -665,14 +696,49 @@ class SiteSurveyShiftDeploymentSerializer(serializers.ModelSerializer):
             + count_for('first_shift_count')
             + count_for('second_shift_count')
             + count_for('night_shift_count')
+            + count_for('reliever_count')
         )
+
+        survey = attrs.get('survey') or (source.survey if source is not None else None)
+        job_role = attrs.get('job_role') or (source.job_role if source is not None else None)
+        working_days = attrs.get('working_days')
+        if working_days is None and source is not None:
+            working_days = source.working_days
+
+        base_wage_overridden = self._has_base_wage_override(attrs)
+        base_wage = attrs.get('base_wage')
+        if base_wage is None and source is not None:
+            base_wage = source.base_wage
+
+        if not base_wage_overridden and survey is not None and job_role is not None:
+            from apps.sales.services import resolve_survey_deployment_wage_snapshot
+
+            resolved_wage, resolved_source = resolve_survey_deployment_wage_snapshot(
+                survey=survey,
+                job_role=job_role,
+                working_days=working_days,
+            )
+            if resolved_wage is not None:
+                base_wage = resolved_wage
+                attrs['base_wage'] = resolved_wage
+                attrs['base_wage_source'] = resolved_source
+
+        if 'base_wage' in attrs and base_wage_overridden:
+            attrs['base_wage_overridden'] = True
+            attrs['base_wage_source'] = 'manual'
+        elif not base_wage_overridden:
+            attrs['base_wage_overridden'] = False
+
+        attrs['monthly_amount'] = (
+            self._decimal_value(attrs['total_count']) * self._decimal_value(base_wage)
+        ).quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
         return attrs
 
     def create(self, validated_data):
-        return super().create(self._apply_calculated_total(validated_data))
+        return super().create(self._apply_calculated_values(validated_data))
 
     def update(self, instance, validated_data):
-        return super().update(instance, self._apply_calculated_total(validated_data))
+        return super().update(instance, self._apply_calculated_values(validated_data))
 
 
 class SiteSurveyLocationLineSerializer(serializers.ModelSerializer):
@@ -741,6 +807,7 @@ class SiteSurveyStructuredSerializer(serializers.Serializer):
     """Read-only grouped payload for GET site-surveys/{id}/structured/."""
 
     survey = SiteSurveySerializer(read_only=True)
+    site_context = SalesLeadSiteSerializer(read_only=True)
     scope_answers = SiteSurveyScopeAnswerSerializer(many=True, read_only=True)
     shift_deployments = SiteSurveyShiftDeploymentSerializer(many=True, read_only=True)
     location_lines = SiteSurveyLocationLineSerializer(many=True, read_only=True)

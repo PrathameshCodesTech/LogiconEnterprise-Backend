@@ -32,6 +32,12 @@ class MeView(generics.RetrieveAPIView):
 
         access_profile = get_user_access_profile(user)
 
+        # Department info for internal MRF creation
+        department = getattr(user, 'department', None)
+        department_id = department.id if department else None
+        department_name = department.name if department else None
+        department_code = department.code if department else None
+
         return Response({
             'id': user.id,
             'username': user.username,
@@ -42,6 +48,9 @@ class MeView(generics.RetrieveAPIView):
             'is_superuser': user.is_superuser,
             'user_type': getattr(user, 'user_type', ''),
             'org': user.org_id,
+            'department': department_id,
+            'department_name': department_name,
+            'department_code': department_code,
             'scope_assignments': UserScopeAssignmentSerializer(scope_assignments, many=True).data,
             'role_assignments': UserRoleAssignmentSerializer(role_assignments, many=True).data,
             'capabilities': get_user_capabilities(user),

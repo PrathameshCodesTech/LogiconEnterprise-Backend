@@ -15,6 +15,10 @@ def _clean_email_text(value):
     return str(value).replace('\r\n', '\n').replace('\r', '\n').strip()
 
 
+def _format_money(value):
+    return f'INR {value:,.2f}'
+
+
 def build_proposal_client_email(
     *,
     proposal,
@@ -46,13 +50,24 @@ def build_proposal_client_email(
             f"Grand total: {proposal.grand_total}"
         )
 
-    body = (
-        f"{opening}\n\n"
-        f"Review proposal:\n"
-        f"{response_url}\n\n"
-        f"This link expires on {expiry_label}.\n\n"
-        f"If you did not expect this email, please ignore it."
-    )
+    body = "\n\n".join([
+        opening,
+        (
+            "---\n"
+            "Secure proposal review\n\n"
+            "Proposal summary\n"
+            f"Proposal: v{proposal.version_number}\n"
+            f"Client: {lead.client_name}\n"
+            f"Total manpower: {proposal.manpower_total}\n"
+            f"Grand total: {_format_money(proposal.grand_total)}\n\n"
+            "Review proposal:\n"
+            f"{response_url}\n\n"
+            "You can review the proposal online and download the commercial "
+            "proposal PDF from the review page.\n\n"
+            f"This secure link expires on {expiry_label}.\n\n"
+            "If you did not expect this email, please ignore it."
+        ),
+    ])
     return subject, body
 
 

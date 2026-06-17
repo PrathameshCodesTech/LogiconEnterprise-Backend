@@ -7,12 +7,14 @@ from .models import JobRole
 class JobRoleSerializer(serializers.ModelSerializer):
     """Read serializer."""
     skill_category_display = serializers.CharField(source='get_skill_category_display', read_only=True)
+    hiring_lane_display = serializers.CharField(source='get_hiring_lane_display', read_only=True)
 
     class Meta:
         model = JobRole
         fields = [
             'id', 'org', 'name', 'code', 'description',
             'skill_category', 'skill_category_display',
+            'hiring_lane', 'hiring_lane_display',
             'is_active', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
@@ -28,7 +30,10 @@ class JobRoleWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = JobRole
-        fields = ['org', 'name', 'code', 'description', 'skill_category', 'is_active']
+        fields = [
+            'org', 'name', 'code', 'description',
+            'skill_category', 'hiring_lane', 'is_active',
+        ]
         # Suppress auto-generated UniqueTogetherValidator for ['org','code'] —
         # org is injected by the view, so the auto-validator would flag it as required.
         validators = []

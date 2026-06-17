@@ -538,6 +538,32 @@ class TestMRFLineItemAPI(MRFTestBase):
         resp = self.api.post('/api/mrf/line-items/', payload, format='json')
         self.assertEqual(resp.status_code, 400)
 
+    def test_create_duplicate_srr_for_same_mrf_400(self):
+        self._login(self.hr_admin)
+        payload = {
+            'mrf': self.mrf.pk,
+            'job_role': self.job_role.pk,
+            'site_role_requirement': self.srr.pk,
+            'headcount': 1,
+        }
+        resp = self.api.post('/api/mrf/line-items/', payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('site_role_requirement', resp.data)
+
+    def test_patch_same_line_item_keeps_srr_200(self):
+        self._login(self.hr_admin)
+        resp = self.api.patch(
+            f'/api/mrf/line-items/{self.line_item.pk}/',
+            {
+                'site_role_requirement': self.srr.pk,
+                'headcount': 4,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['site_role_requirement'], self.srr.pk)
+        self.assertEqual(resp.data['headcount'], 4)
+
     def test_headcount_zero_blocked_400(self):
         self._login(self.hr_admin)
         payload = {
@@ -732,29 +758,47 @@ class TestMRFBudgetLink(MRFTestBase):
         self.assertIn('budget_plan', str(resp.data))
 
     def test_non_billable_mrf_with_department_budget_succeeds(self):
-        """Non-billable MRF with budget matching the required_department succeeds."""
+        """Non-billable MRF uses the requester's own department budget and no site."""
         budget = _budget_plan(
             self.org, nature='non_billable',
-            department=self.dept_housekeeping, code='mrf-nb-dept-ok',
+            department=self.dept_operations, code='mrf-nb-dept-ok',
             budget_type='hiring',
         )
         self._login(self.hr_admin)
         payload = self._mrf_payload(budget.pk, billing_type='non_billable')
-        payload['required_department'] = self.dept_housekeeping.pk
+        payload.pop('site')
         resp = self.api.post(self.MRF_URL, payload, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(resp.data['site'])
+        self.assertEqual(resp.data['requesting_department'], self.dept_operations.pk)
+        self.assertEqual(resp.data['required_department'], self.dept_operations.pk)
         self.assertEqual(resp.data['budget_plan'], budget.pk)
+
+    def test_non_billable_mrf_for_other_department_rejected(self):
+        """Normal internal users cannot raise non-billable MRFs for another department."""
+        budget = _budget_plan(
+            self.org, nature='non_billable',
+            department=self.dept_housekeeping, code='mrf-nb-dept-other',
+            budget_type='hiring',
+        )
+        self._login(self.hr_admin)
+        payload = self._mrf_payload(budget.pk, billing_type='non_billable')
+        payload.pop('site')
+        payload['required_department'] = self.dept_housekeeping.pk
+        resp = self.api.post(self.MRF_URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('required_department', resp.data)
 
     def test_non_billable_mrf_with_non_hiring_department_budget_rejected(self):
         """Non-billable MRF requires an internal hiring budget, not a general department budget."""
         budget = _budget_plan(
             self.org, nature='non_billable',
-            department=self.dept_housekeeping, code='mrf-nb-dept-general',
+            department=self.dept_operations, code='mrf-nb-dept-general',
             budget_type='general',
         )
         self._login(self.hr_admin)
         payload = self._mrf_payload(budget.pk, billing_type='non_billable')
-        payload['required_department'] = self.dept_housekeeping.pk
+        payload.pop('site')
         resp = self.api.post(self.MRF_URL, payload, format='json')
         self.assertEqual(resp.status_code, 400)
         self.assertIn('hiring budget', str(resp.data).lower())

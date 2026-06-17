@@ -16,7 +16,20 @@ from .models import (
     Candidate, Resume, CandidateSkill,
     ParsedResume, CandidateExperience, CandidateEducation,
     TalentResumeReview, ResumeImportBatch, ResumeImportItem,
+    HIRING_LANE_CHOICES,
 )
+
+
+VALID_HIRING_LANES = {code for code, _label in HIRING_LANE_CHOICES}
+
+
+def _validate_target_role_lane(target_job_role, hiring_lane):
+    if target_job_role and hiring_lane and target_job_role.hiring_lane != hiring_lane:
+        raise serializers.ValidationError({
+            'target_job_role': (
+                'Target job role does not belong to the selected hiring category.'
+            )
+        })
 
 
 # ─── CandidateSkill ───────────────────────────────────────────────────────────
@@ -37,6 +50,7 @@ class CandidateSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
     target_job_role_name = serializers.CharField(source='target_job_role.name', read_only=True)
     target_job_role_code = serializers.CharField(source='target_job_role.code', read_only=True)
+    hiring_lane_label = serializers.CharField(source='get_hiring_lane_display', read_only=True)
     skills_count = serializers.SerializerMethodField()
     resume_count = serializers.SerializerMethodField()
     latest_resume_status = serializers.SerializerMethodField()
@@ -67,6 +81,7 @@ class CandidateSerializer(serializers.ModelSerializer):
             'preferred_location', 'notice_period_days',
             'current_company', 'current_role',
             'target_job_role', 'target_job_role_name', 'target_job_role_code',
+            'hiring_lane', 'hiring_lane_label',
             'source_reference',
             'is_duplicate', 'duplicate_of', 'do_not_contact',
             'skills_count', 'resume_count',
@@ -176,7 +191,7 @@ class CandidateWriteSerializer(serializers.ModelSerializer):
             'source', 'lifecycle_status', 'availability_status',
             'preferred_location', 'notice_period_days',
             'current_company', 'current_role',
-            'target_job_role', 'source_reference',
+            'target_job_role', 'hiring_lane', 'source_reference',
         ]
         extra_kwargs = {
             'phone': {'required': True},
@@ -202,6 +217,23 @@ class CandidateWriteSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def validate_hiring_lane(self, value):
+        if value and value not in VALID_HIRING_LANES:
+            raise serializers.ValidationError('Invalid hiring category.')
+        return value
+
+    def validate(self, data):
+        target_job_role = data.get(
+            'target_job_role',
+            getattr(self.instance, 'target_job_role', None),
+        )
+        hiring_lane = data.get(
+            'hiring_lane',
+            getattr(self.instance, 'hiring_lane', ''),
+        )
+        _validate_target_role_lane(target_job_role, hiring_lane)
+        return data
+
 
 # ─── Resume ───────────────────────────────────────────────────────────────────
 
@@ -209,6 +241,7 @@ class ResumeSerializer(serializers.ModelSerializer):
     """Read serializer for resumes."""
     target_job_role_name = serializers.CharField(source='target_job_role.name', read_only=True)
     target_job_role_code = serializers.CharField(source='target_job_role.code', read_only=True)
+    hiring_lane_label = serializers.CharField(source='get_hiring_lane_display', read_only=True)
     candidate_full_name = serializers.CharField(source='candidate.full_name', read_only=True)
     candidate_phone = serializers.CharField(source='candidate.phone', read_only=True)
 
@@ -220,6 +253,7 @@ class ResumeSerializer(serializers.ModelSerializer):
             'size_bytes', 'parsed_status', 'uploaded_at', 'view_only_note',
             'status', 'file_hash', 'document_type', 'source_type',
             'target_job_role', 'target_job_role_name', 'target_job_role_code',
+            'hiring_lane', 'hiring_lane_label',
             'target_role_source', 'import_batch_id',
             'ocr_used', 'extraction_engine', 'extraction_confidence',
             'parser_engine', 'parser_confidence',
@@ -239,12 +273,13 @@ class ResumeWriteSerializer(serializers.ModelSerializer):
         model = Resume
         fields = [
             'candidate', 'file', 'source_type', 'view_only_note',
-            'target_job_role', 'target_role_source',
+            'target_job_role', 'hiring_lane', 'target_role_source',
         ]
         extra_kwargs = {
             'source_type': {'required': False},
             'view_only_note': {'required': False},
             'target_job_role': {'required': False, 'allow_null': True},
+            'hiring_lane': {'required': False, 'allow_blank': True},
             'target_role_source': {'required': False, 'allow_blank': True},
         }
 
@@ -271,12 +306,24 @@ class ResumeWriteSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def validate_hiring_lane(self, value):
+        if value and value not in VALID_HIRING_LANES:
+            raise serializers.ValidationError('Invalid hiring category.')
+        return value
+
+    def validate(self, data):
+        target_job_role = data.get('target_job_role')
+        hiring_lane = data.get('hiring_lane') or ''
+        _validate_target_role_lane(target_job_role, hiring_lane)
+        return data
+
 
 class ResumeBulkUploadSerializer(serializers.Serializer):
     """Input for POST /api/talent/resumes/bulk-upload/."""
 
     files = serializers.ListField(child=serializers.FileField(), allow_empty=False)
     target_job_role = serializers.PrimaryKeyRelatedField(queryset=JobRole.objects.all())
+    hiring_lane = serializers.ChoiceField(choices=[code for code, _label in HIRING_LANE_CHOICES])
     source_type = serializers.ChoiceField(
         choices=['bulk_upload', 'recruiter_upload', 'manual_upload', 'campaign'],
         default='bulk_upload',
@@ -296,6 +343,10 @@ class ResumeBulkUploadSerializer(serializers.Serializer):
             )
         return value
 
+    def validate(self, data):
+        _validate_target_role_lane(data.get('target_job_role'), data.get('hiring_lane'))
+        return data
+
 
 class ResumeExcelImportSerializer(serializers.Serializer):
     """Input for POST /api/talent/resumes/excel-import/."""
@@ -304,6 +355,7 @@ class ResumeExcelImportSerializer(serializers.Serializer):
     target_job_role = serializers.PrimaryKeyRelatedField(
         queryset=JobRole.objects.all(), required=False, allow_null=True,
     )
+    hiring_lane = serializers.ChoiceField(choices=[code for code, _label in HIRING_LANE_CHOICES])
     source_type = serializers.ChoiceField(
         choices=['excel_import', 'bulk_upload', 'campaign'],
         default='excel_import',
@@ -321,6 +373,10 @@ class ResumeExcelImportSerializer(serializers.Serializer):
                 'Target job role does not belong to your organization.'
             )
         return value
+
+    def validate(self, data):
+        _validate_target_role_lane(data.get('target_job_role'), data.get('hiring_lane'))
+        return data
 
 
 class ResumeImportItemSerializer(serializers.ModelSerializer):
@@ -340,13 +396,15 @@ class ResumeImportItemSerializer(serializers.ModelSerializer):
 class ResumeImportBatchSerializer(serializers.ModelSerializer):
     target_job_role_name = serializers.CharField(source='target_job_role.name', read_only=True)
     target_job_role_code = serializers.CharField(source='target_job_role.code', read_only=True)
+    hiring_lane_label = serializers.CharField(source='get_hiring_lane_display', read_only=True)
     items = ResumeImportItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = ResumeImportBatch
         fields = [
             'id', 'org', 'target_job_role', 'target_job_role_name',
-            'target_job_role_code', 'source_type', 'status',
+            'target_job_role_code', 'hiring_lane', 'hiring_lane_label',
+            'source_type', 'status',
             'import_file', 'original_filename', 'content_type',
             'size_bytes', 'document_type',
             'total_count', 'processed_count', 'success_count',

@@ -202,6 +202,14 @@ EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@logicon.local')
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://127.0.0.1:5173').strip().rstrip('/')
 
+# Asset Vault lightweight SSO handoff.
+# Keep these explicit in each environment; the launch endpoint fails closed if
+# the URL or secret is missing.
+ASSET_VAULT_BASE_URL = config('ASSET_VAULT_BASE_URL', default='').strip().rstrip('/')
+ASSET_VAULT_SSO_SECRET = config('ASSET_VAULT_SSO_SECRET', default='').strip()
+ASSET_VAULT_SSO_CONSUME_PATH = config('ASSET_VAULT_SSO_CONSUME_PATH', default='/sso/logicon').strip()
+ASSET_VAULT_SSO_TTL_SECONDS = config('ASSET_VAULT_SSO_TTL_SECONDS', default=60, cast=int)
+
 # ─── Simple JWT ───────────────────────────────────────────────────────────────
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),

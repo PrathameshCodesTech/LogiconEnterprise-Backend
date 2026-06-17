@@ -14,6 +14,11 @@ Capability map:
   ClientProposalResponse sales_proposal.read / .update
 """
 
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.http import HttpResponse
+from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -248,6 +253,8 @@ class SiteSurveyViewSet(ScopedModelViewSet):
         'mark_completed':       'sales_survey.update',
         'structured':           'sales_survey.read',
         'seed_default_lines':   'sales_survey.update',
+        'refresh_deployment_assumptions': 'sales_survey.update',
+        'commercial_preview':   'sales_proposal.read',
         'generate_role_requirements': 'sales_survey.update',
     }
 
@@ -301,6 +308,7 @@ class SiteSurveyViewSet(ScopedModelViewSet):
         data = SiteSurveyStructuredSerializer(
             {
                 'survey': survey,
+                'site_context': survey.site,
                 'scope_answers': survey.scope_answers.all(),
                 'shift_deployments': survey.shift_deployments.all(),
                 'location_lines': survey.location_lines.all(),
@@ -322,6 +330,28 @@ class SiteSurveyViewSet(ScopedModelViewSet):
             'overwrite': overwrite,
             'counts': counts,
         })
+
+    @action(detail=True, methods=['post'], url_path='refresh-deployment-assumptions')
+    def refresh_deployment_assumptions(self, request, pk=None):
+        """
+        Resolve current wage/monthly assumptions for role-linked deployment rows.
+
+        Manual base wage overrides are preserved. Rows without a structured
+        job role are returned as errors so the UI can ask operations to map them.
+        """
+        from apps.sales.services import refresh_survey_deployment_commercial_assumptions
+
+        survey = self.get_object()
+        result = refresh_survey_deployment_commercial_assumptions(survey)
+        return Response(result)
+
+    @action(detail=True, methods=['get'], url_path='commercial-preview')
+    def commercial_preview(self, request, pk=None):
+        """Preview sales commercials from generated survey role requirements."""
+        from apps.sales.services import build_survey_commercial_preview
+
+        survey = self.get_object()
+        return Response(build_survey_commercial_preview(survey))
 
     @action(detail=True, methods=['post'], url_path='generate-role-requirements')
     def generate_role_requirements(self, request, pk=None):
@@ -401,6 +431,8 @@ class ProposalVersionViewSet(ScopedModelViewSet):
         'submit_internal_approval': 'sales_proposal.update',
         'mark_internally_approved': 'sales_proposal.approve',
         'send_to_client':           'sales_proposal.send_to_client',
+        'client_document':          'sales_proposal.read',
+        'client_document_pdf':      'sales_proposal.read',
         'client_response':          'sales_proposal.update',
         'clone_revision':           'sales_proposal.create',
         'convert_to_onboarding':    'sales_proposal.update',
@@ -524,6 +556,30 @@ class ProposalVersionViewSet(ScopedModelViewSet):
             'email_subject': result.get('email_subject', ''),
             'email_body': result.get('email_body', ''),
         })
+
+    @action(detail=True, methods=['get'], url_path='client-document')
+    def client_document(self, request, pk=None):
+        from apps.sales.proposal_document import build_client_proposal_document_data
+        proposal = self.get_object()
+        try:
+            data = build_client_proposal_document_data(proposal)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(data)
+
+    @action(detail=True, methods=['get'], url_path='client-document/pdf')
+    def client_document_pdf(self, request, pk=None):
+        from apps.sales.proposal_document import render_client_proposal_pdf
+        proposal = self.get_object()
+        try:
+            pdf = render_client_proposal_pdf(proposal)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        lead_slug = slugify(proposal.lead.client_name) or 'client'
+        filename = f'proposal-v{proposal.version_number}-{lead_slug}.pdf'
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
     @action(detail=True, methods=['post'], url_path='client-response')
     def client_response(self, request, pk=None):
@@ -657,7 +713,31 @@ class ProposalBudgetLineViewSet(ScopedModelViewSet):
             or serializer.instance.proposal_version
         )
         assert_proposal_editable(proposal)
-        super().perform_update(serializer)
+        commercial_fields = {'unit_cost', 'manpower_count'}
+        updates = {}
+        if commercial_fields.intersection(serializer.validated_data.keys()):
+            unit_cost = Decimal(
+                serializer.validated_data.get('unit_cost', serializer.instance.unit_cost) or 0
+            )
+            manpower_count = Decimal(
+                serializer.validated_data.get(
+                    'manpower_count', serializer.instance.manpower_count,
+                ) or 0
+            )
+            updates.update({
+                'total_cost': (unit_cost * manpower_count).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP,
+                ),
+                'is_manual_override': True,
+                'overridden_by': self.request.user,
+                'overridden_at': timezone.now(),
+            })
+            if not (
+                serializer.validated_data.get('override_reason')
+                or serializer.instance.override_reason
+            ):
+                updates['override_reason'] = 'Sales commercial adjustment.'
+        serializer.save(**updates)
 
     def perform_destroy(self, instance):
         from apps.sales.proposal_calculation import assert_proposal_editable

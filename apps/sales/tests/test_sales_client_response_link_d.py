@@ -11,6 +11,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.access.capabilities import (
+    MOBILISATION_CREATE,
     SALES_LEAD_UPDATE, SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE,
     SALES_PROPOSAL_UPDATE, SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
     SALES_SURVEY_UPDATE,
@@ -22,7 +23,8 @@ from apps.core.models import Organization, ScopeNode
 from apps.jobs.models import JobRole
 from apps.sales.models import (
     SalesLead, SalesLeadSite, SiteSurvey, SalesRoleRequirement,
-    ProposalVersion, SalesProposalClientToken, ClientProposalResponse,
+    ProposalVersion, ProposalBreakupLine,
+    SalesProposalClientToken, ClientProposalResponse,
 )
 from apps.sales.services import (
     generate_proposal_version,
@@ -40,6 +42,7 @@ from apps.sales.token_utils import hash_client_proposal_token
 
 PROPOSALS_URL = '/api/sales/proposal-versions/'
 PUBLIC_URL = '/api/sales/public/proposal-response/{token}/'
+PUBLIC_PDF_URL = '/api/sales/public/proposal-response/{token}/client-document/pdf/'
 
 
 def _org(code):
@@ -59,7 +62,7 @@ def _caps():
     return [
         SALES_LEAD_UPDATE, SALES_PROPOSAL_READ, SALES_PROPOSAL_CREATE,
         SALES_PROPOSAL_UPDATE, SALES_PROPOSAL_APPROVE, SALES_PROPOSAL_SEND_TO_CLIENT,
-        SALES_SURVEY_UPDATE,
+        SALES_SURVEY_UPDATE, MOBILISATION_CREATE,
     ]
 
 
@@ -133,6 +136,10 @@ class TestClientProposalToken(TestCase):
         self.assertNotIn('http', token.token_hash)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn('proposal-response?token=', mail.outbox[0].body)
+        self.assertIn('Secure proposal review', mail.outbox[0].body)
+        self.assertIn('Proposal summary', mail.outbox[0].body)
+        self.assertIn('Grand total: INR', mail.outbox[0].body)
+        self.assertIn('download the commercial proposal PDF', mail.outbox[0].body)
 
     def test_send_does_not_mark_sent_if_email_fails(self):
         from unittest.mock import patch
@@ -184,6 +191,13 @@ class TestPublicProposalResponseAPI(TestCase):
         self.assertIn('job_role_name', breakup_line)
         self.assertIn('site_name', breakup_line)
         self.assertFalse(resp.data['already_responded'])
+
+    def test_public_pdf_download_returns_pdf(self):
+        resp = APIClient().get(PUBLIC_PDF_URL.format(token=self.raw_token))
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+        self.assertIn('attachment;', resp['Content-Disposition'])
+        self.assertTrue(resp.content.startswith(b'%PDF'))
 
     def test_invalid_token_rejected(self):
         resp = APIClient().get(PUBLIC_URL.format(token='not-a-real-token'))
@@ -296,12 +310,19 @@ class TestSendToClientAPI(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(mail.outbox[-1].subject, 'Please review revised commercial proposal')
         self.assertIn('Dear Buyer', mail.outbox[-1].body)
+        self.assertIn('Secure proposal review', mail.outbox[-1].body)
+        self.assertIn('Proposal summary', mail.outbox[-1].body)
+        self.assertIn(f'Proposal: v{self.proposal.version_number}', mail.outbox[-1].body)
+        self.assertIn('Client: Acme', mail.outbox[-1].body)
+        self.assertIn('Grand total: INR', mail.outbox[-1].body)
+        self.assertIn('download the commercial proposal PDF', mail.outbox[-1].body)
         self.assertIn('Review proposal:', mail.outbox[-1].body)
         self.assertIn('proposal-response?token=', mail.outbox[-1].body)
 
         token = SalesProposalClientToken.objects.get(proposal_version=self.proposal)
         self.assertEqual(token.email_subject, 'Please review revised commercial proposal')
         self.assertIn('Dear Buyer', token.email_body)
+        self.assertIn('download the commercial proposal PDF', token.email_body)
         self.assertIn('[secure-token-redacted]', token.email_body)
         raw_token = re.search(r'token=([^\s]+)', mail.outbox[-1].body).group(1)
         self.assertNotIn(raw_token, token.email_body)
@@ -331,6 +352,32 @@ class TestSendToClientAPI(TestCase):
         )
         self.assertEqual(resp.status_code, 400)
         self.assertIn('email_subject', resp.data['detail'])
+
+    def test_client_document_data_returns_normalized_payload(self):
+        resp = self.client.get(f'{PROPOSALS_URL}{self.proposal.pk}/client-document/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['client']['name'], 'Acme')
+        self.assertIn('commercial_summary', resp.data)
+        self.assertIn('manpower_lines', resp.data)
+        self.assertIn('role_cost_structure', resp.data)
+
+    def test_client_document_pdf_returns_pdf(self):
+        resp = self.client.get(f'{PROPOSALS_URL}{self.proposal.pk}/client-document/pdf/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+        self.assertIn('attachment;', resp['Content-Disposition'])
+        self.assertTrue(resp.content.startswith(b'%PDF'))
+
+    def test_client_document_blocks_unmapped_breakup(self):
+        line = ProposalBreakupLine.objects.filter(
+            proposal_version=self.proposal,
+        ).first()
+        line.role_requirement = None
+        line.save(update_fields=['role_requirement', 'updated_at'])
+
+        resp = self.client.get(f'{PROPOSALS_URL}{self.proposal.pk}/client-document/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Salary breakup is missing role mapping', resp.data['detail'])
 
 
 @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')

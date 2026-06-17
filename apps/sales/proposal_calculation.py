@@ -10,6 +10,7 @@ starter DB rules and for low-level salary helper tests.
 
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from types import SimpleNamespace
 
 from django.db import transaction
 from django.db.models import Q
@@ -180,6 +181,24 @@ def get_wage_rate_for_requirement(role_requirement, on_date=None):
             f'No wage rate configured for {loc_label} / {wage_cat.name}'
         )
     return rate
+
+
+def get_pricing_wage_basis_for_requirement(role_requirement, on_date=None):
+    """
+    Return the wage basis for proposal generation.
+
+    Survey-generated requirements may carry an operations-approved wage snapshot.
+    Prefer that snapshot so proposals remain auditable even when wage masters are
+    changed later. Older/manual requirements still resolve from wage masters.
+    """
+    operational_wage = Decimal(getattr(role_requirement, 'operational_base_wage', None) or 0)
+    if operational_wage > 0:
+        return SimpleNamespace(
+            monthly_wage=_money(operational_wage),
+            daily_wage=Decimal('0.00'),
+            source='operations_snapshot',
+        )
+    return get_wage_rate_for_requirement(role_requirement, on_date=on_date)
 
 
 # Default code-constant percentages (×100, to match rule.percentage scale).
@@ -583,7 +602,7 @@ def generate_proposal_lines_from_requirements(proposal, requirements, force=Fals
         ).exists():
             continue
 
-        wage_rate = get_wage_rate_for_requirement(req)
+        wage_rate = get_pricing_wage_basis_for_requirement(req)
         breakup_data = build_salary_breakup(req, wage_rate, ruleset=ruleset)
         unit_cost = calculate_role_unit_cost(req, breakup_data)
         manpower = req.manpower_count
@@ -608,6 +627,12 @@ def generate_proposal_lines_from_requirements(proposal, requirements, force=Fals
             manpower_count=manpower,
             unit_cost=unit_cost,
             total_cost=total_cost,
+            source_unit_cost=unit_cost,
+            source_unit_cost_origin=(
+                'operations_snapshot'
+                if Decimal(getattr(req, 'operational_base_wage', None) or 0) > 0
+                else 'wage_master'
+            ),
             remarks=remarks,
             sort_order=budget_sort,
         )

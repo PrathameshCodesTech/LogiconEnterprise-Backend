@@ -77,10 +77,8 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
     candidate_phone = serializers.CharField(
         source='candidate.phone', read_only=True,
     )
-    site_name = serializers.CharField(source='site.name', read_only=True)
-    client_name = serializers.CharField(
-        source='site.client.name', read_only=True, default=None,
-    )
+    site_name = serializers.SerializerMethodField()
+    client_name = serializers.SerializerMethodField()
     job_role_name = serializers.CharField(source='job_role.name', read_only=True)
     current_stage_name = serializers.CharField(
         source='current_stage.name', read_only=True, default=None,
@@ -119,6 +117,14 @@ class HiringApplicationReadSerializer(serializers.ModelSerializer):
 
     def get_candidate_name(self, obj):
         return obj.candidate.full_name
+
+    def get_site_name(self, obj):
+        return obj.site.name if obj.site else None
+
+    def get_client_name(self, obj):
+        if obj.site and obj.site.client:
+            return obj.site.client.name
+        return None
 
     def get_recent_stage_history(self, obj):
         history = (
@@ -451,10 +457,8 @@ class InterviewAssignmentSerializer(serializers.ModelSerializer):
     candidate_phone = serializers.CharField(
         source='hiring_application.candidate.phone', read_only=True,
     )
-    site_name = serializers.CharField(source='hiring_application.site.name', read_only=True)
-    client_name = serializers.CharField(
-        source='hiring_application.site.client.name', read_only=True, default=None,
-    )
+    site_name = serializers.SerializerMethodField()
+    client_name = serializers.SerializerMethodField()
     job_role_name = serializers.CharField(
         source='hiring_application.job_role.name', read_only=True,
     )
@@ -489,6 +493,16 @@ class InterviewAssignmentSerializer(serializers.ModelSerializer):
                 f"Round {obj.planned_round.round_number} "
                 f"({obj.planned_round.get_round_type_display()})"
             )
+        return None
+
+    def get_site_name(self, obj):
+        site = obj.hiring_application.site
+        return site.name if site else None
+
+    def get_client_name(self, obj):
+        site = obj.hiring_application.site
+        if site and site.client:
+            return site.client.name
         return None
 
     def get_latest_feedback(self, obj):
@@ -602,10 +616,8 @@ class ClientReviewApplicationSerializer(serializers.ModelSerializer):
     """
     candidate_summary = serializers.SerializerMethodField()
     job_role_name = serializers.CharField(source='job_role.name', read_only=True)
-    site_name = serializers.CharField(source='site.name', read_only=True)
-    client_name = serializers.CharField(
-        source='site.client.name', read_only=True, default=None,
-    )
+    site_name = serializers.SerializerMethodField()
+    client_name = serializers.SerializerMethodField()
     current_stage_name = serializers.CharField(
         source='current_stage.name', read_only=True, default=None,
     )
@@ -654,6 +666,14 @@ class ClientReviewApplicationSerializer(serializers.ModelSerializer):
             ),
             'availability_status': c.availability_status or '',
         }
+
+    def get_site_name(self, obj):
+        return obj.site.name if obj.site else None
+
+    def get_client_name(self, obj):
+        if obj.site and obj.site.client:
+            return obj.site.client.name
+        return None
 
     def get_resume_summary(self, obj):
         """Parsed resume metadata - deliberately excludes raw_text and cleaned_text."""

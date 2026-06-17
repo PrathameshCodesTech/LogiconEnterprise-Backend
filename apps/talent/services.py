@@ -320,6 +320,7 @@ def import_resume_file_for_role(
     user,
     uploaded_file,
     target_job_role,
+    hiring_lane: str,
     source_type: str = 'bulk_upload',
     view_only_note: str = '',
     import_batch_id: str = '',
@@ -343,6 +344,10 @@ def import_resume_file_for_role(
     org = user.org
     if target_job_role.org_id != org.id:
         raise ValidationError({'target_job_role': 'Target job role does not belong to your organization.'})
+    if target_job_role.hiring_lane != hiring_lane:
+        raise ValidationError({
+            'target_job_role': 'Target job role does not belong to the selected hiring category.'
+        })
 
     filename = original_filename or getattr(uploaded_file, 'name', '') or 'resume'
     content_type = content_type or getattr(uploaded_file, 'content_type', '') or ''
@@ -397,6 +402,7 @@ def import_resume_file_for_role(
             phone=normalized.get('phone') or phone_normalized,
             normalized=normalized,
             target_job_role=target_job_role,
+            hiring_lane=hiring_lane,
             source='import_' if source_type in ('bulk_upload', 'excel_import') else 'qr',
         )
 
@@ -409,6 +415,7 @@ def import_resume_file_for_role(
             document_type=document_type,
             source_type=source_type,
             target_job_role=target_job_role,
+            hiring_lane=hiring_lane,
             target_role_source=source_type if source_type in {'bulk_upload', 'campaign', 'qr_intake'} else 'bulk_upload',
             import_batch_id=import_batch_id,
             status='validating',
@@ -448,14 +455,27 @@ def import_resume_file_for_role(
     }
 
 
-def create_resume_import_batch(user, files, target_job_role, source_type='bulk_upload', view_only_note=''):
+def create_resume_import_batch(
+    user,
+    files,
+    target_job_role,
+    hiring_lane,
+    source_type='bulk_upload',
+    view_only_note='',
+):
     """Create a bulk import batch and enqueue one Celery task per file."""
     from .models import ResumeImportBatch, ResumeImportItem
+
+    if target_job_role.hiring_lane != hiring_lane:
+        raise ValidationError({
+            'target_job_role': 'Target job role does not belong to the selected hiring category.'
+        })
 
     with transaction.atomic():
         batch = ResumeImportBatch.objects.create(
             org=user.org,
             target_job_role=target_job_role,
+            hiring_lane=hiring_lane,
             source_type=source_type,
             total_count=len(files),
             view_only_note=view_only_note,
@@ -514,6 +534,7 @@ def process_resume_import_item(item_id: int) -> None:
             user=item.batch.created_by,
             uploaded_file=item.file,
             target_job_role=item.batch.target_job_role,
+            hiring_lane=item.batch.hiring_lane,
             source_type=item.batch.source_type,
             view_only_note=item.batch.view_only_note,
             import_batch_id=str(item.batch_id),
@@ -576,7 +597,14 @@ def _refresh_resume_import_batch_counts(batch_id: int) -> None:
     )
 
 
-def bulk_import_resume_files(user, files, target_job_role, source_type='bulk_upload', view_only_note='') -> dict:
+def bulk_import_resume_files(
+    user,
+    files,
+    target_job_role,
+    hiring_lane,
+    source_type='bulk_upload',
+    view_only_note='',
+) -> dict:
     batch_id = uuid.uuid4().hex
     items = []
     created = 0
@@ -590,6 +618,7 @@ def bulk_import_resume_files(user, files, target_job_role, source_type='bulk_upl
                 user=user,
                 uploaded_file=uploaded_file,
                 target_job_role=target_job_role,
+                hiring_lane=hiring_lane,
                 source_type=source_type,
                 view_only_note=view_only_note,
                 import_batch_id=batch_id,
@@ -616,9 +645,22 @@ def bulk_import_resume_files(user, files, target_job_role, source_type='bulk_upl
     }
 
 
-def import_candidates_from_excel(user, uploaded_file, default_target_job_role=None, source_type='excel_import') -> dict:
+def import_candidates_from_excel(
+    user,
+    uploaded_file,
+    default_target_job_role=None,
+    hiring_lane='',
+    source_type='excel_import',
+) -> dict:
     """Import candidate rows from CSV/XLSX, store the sheet, and tag rows to roles."""
     from apps.talent.models import Candidate, CandidateSkill, ResumeImportBatch, ResumeImportItem
+
+    if not hiring_lane:
+        raise ValidationError({'hiring_lane': 'Hiring category is required.'})
+    if default_target_job_role and default_target_job_role.hiring_lane != hiring_lane:
+        raise ValidationError({
+            'target_job_role': 'Target job role does not belong to the selected hiring category.'
+        })
 
     filename = getattr(uploaded_file, 'name', '') or 'candidate-import'
     content_type = getattr(uploaded_file, 'content_type', '') or ''
@@ -634,6 +676,7 @@ def import_candidates_from_excel(user, uploaded_file, default_target_job_role=No
         batch = ResumeImportBatch.objects.create(
             org=user.org,
             target_job_role=default_target_job_role,
+            hiring_lane=hiring_lane,
             source_type=source_type,
             status='processing',
             total_count=len(rows),
@@ -649,6 +692,12 @@ def import_candidates_from_excel(user, uploaded_file, default_target_job_role=No
             source_row_number = row.get('_source_row_number') or index
             try:
                 role = _resolve_import_job_role(user.org, row, default_target_job_role)
+                if role and role.hiring_lane != hiring_lane:
+                    raise ValidationError({
+                        'target_job_role': (
+                            'Row job role does not belong to the selected hiring category.'
+                        )
+                    })
                 phone = _value(row, 'phone', 'mobile', 'contact')
                 if not phone:
                     raise ValidationError({'phone': 'Phone/mobile is required.'})
@@ -670,6 +719,7 @@ def import_candidates_from_excel(user, uploaded_file, default_target_job_role=No
                         'current_company': _value(row, 'current_company', 'company') or '',
                         'current_role': _value(row, 'current_role', 'role', 'job_role') or (role.name if role else ''),
                         'target_job_role': role,
+                        'hiring_lane': hiring_lane,
                         'source_reference': source_reference,
                         'source': 'import_',
                     },
@@ -687,11 +737,14 @@ def import_candidates_from_excel(user, uploaded_file, default_target_job_role=No
                         'current_company': _value(row, 'current_company', 'company') or '',
                         'current_role': _value(row, 'current_role', 'role', 'job_role') or (role.name if role else ''),
                         'target_job_role': role,
+                        'hiring_lane': hiring_lane,
                     }
                     if not candidate.source_reference:
                         updates['source_reference'] = source_reference
                     for field, value in updates.items():
                         if value is None or value == '':
+                            continue
+                        if field == 'hiring_lane' and candidate.hiring_lane:
                             continue
                         if getattr(candidate, field) != value:
                             setattr(candidate, field, value)
@@ -765,7 +818,16 @@ def import_candidates_from_excel(user, uploaded_file, default_target_job_role=No
     }
 
 
-def _get_or_create_import_candidate(*, org, phone_normalized, phone, normalized, target_job_role, source):
+def _get_or_create_import_candidate(
+    *,
+    org,
+    phone_normalized,
+    phone,
+    normalized,
+    target_job_role,
+    hiring_lane,
+    source,
+):
     from .models import Candidate
 
     first_name = normalized.get('first_name') or 'Unknown'
@@ -781,6 +843,7 @@ def _get_or_create_import_candidate(*, org, phone_normalized, phone, normalized,
         'total_experience_years': _decimal_or_none(normalized.get('total_experience_years')),
         'current_company': normalized.get('current_company') or '',
         'target_job_role': target_job_role,
+        'hiring_lane': hiring_lane,
         'source': source,
     }
     candidate, created = Candidate.objects.get_or_create(
@@ -798,6 +861,8 @@ def _get_or_create_import_candidate(*, org, phone_normalized, phone, normalized,
         if field in ('first_name', 'last_name') and getattr(candidate, field) not in ('', 'Unknown'):
             continue
         if field == 'target_job_role' and candidate.target_job_role_id:
+            continue
+        if field == 'hiring_lane' and candidate.hiring_lane:
             continue
         if getattr(candidate, field) != incoming:
             setattr(candidate, field, incoming)

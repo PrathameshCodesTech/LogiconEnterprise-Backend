@@ -104,6 +104,8 @@ class HiringApplication(TimeStampedModel):
     site = models.ForeignKey(
         'sites.SiteProfile',
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
         related_name='hiring_applications',
     )
     job_role = models.ForeignKey(

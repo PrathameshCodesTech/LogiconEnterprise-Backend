@@ -89,6 +89,11 @@ TARGET_ROLE_SOURCE_CHOICES = [
     ('qr_intake', 'QR Intake'),
 ]
 
+HIRING_LANE_CHOICES = [
+    ('client_billable', 'Client site manpower'),
+    ('internal_non_billable', 'Internal staff hiring'),
+]
+
 SKILL_PROFICIENCY_CHOICES = [
     ('beginner', 'Beginner'),
     ('intermediate', 'Intermediate'),
@@ -143,6 +148,13 @@ class Candidate(TimeStampedModel):
         blank=True,
         related_name='targeted_candidates',
     )
+    hiring_lane = models.CharField(
+        max_length=32,
+        choices=HIRING_LANE_CHOICES,
+        blank=True,
+        default='',
+        db_index=True,
+    )
     source_reference = models.CharField(max_length=255, blank=True)
     duplicate_of = models.ForeignKey(
         'self', on_delete=models.SET_NULL,
@@ -160,6 +172,7 @@ class Candidate(TimeStampedModel):
             models.Index(fields=['org', 'lifecycle_status']),
             models.Index(fields=['org', 'availability_status']),
             models.Index(fields=['org', 'target_job_role']),
+            models.Index(fields=['org', 'hiring_lane']),
             models.Index(fields=['email']),
             models.Index(fields=['phone_normalized']),
         ]
@@ -228,6 +241,13 @@ class Resume(models.Model):
         blank=True,
         related_name='targeted_resumes',
     )
+    hiring_lane = models.CharField(
+        max_length=32,
+        choices=HIRING_LANE_CHOICES,
+        blank=True,
+        default='',
+        db_index=True,
+    )
     target_role_source = models.CharField(
         max_length=20,
         choices=TARGET_ROLE_SOURCE_CHOICES,
@@ -260,6 +280,7 @@ class Resume(models.Model):
             models.Index(fields=['document_type']),
             models.Index(fields=['candidate', 'status']),
             models.Index(fields=['target_job_role', 'status']),
+            models.Index(fields=['hiring_lane', 'status']),
             models.Index(fields=['source_type', 'target_job_role']),
             models.Index(fields=['import_batch_id']),
             models.Index(fields=['source_intake_document']),
@@ -279,6 +300,13 @@ class ResumeImportBatch(TimeStampedModel):
         null=True,
         blank=True,
         related_name='resume_import_batches',
+    )
+    hiring_lane = models.CharField(
+        max_length=32,
+        choices=HIRING_LANE_CHOICES,
+        blank=True,
+        default='',
+        db_index=True,
     )
     source_type = models.CharField(
         max_length=20, choices=RESUME_SOURCE_TYPE_CHOICES, default='bulk_upload',
@@ -317,6 +345,7 @@ class ResumeImportBatch(TimeStampedModel):
         indexes = [
             models.Index(fields=['org', 'status']),
             models.Index(fields=['org', 'target_job_role']),
+            models.Index(fields=['org', 'hiring_lane']),
             models.Index(fields=['org', 'document_type']),
             models.Index(fields=['created_by', 'status']),
         ]

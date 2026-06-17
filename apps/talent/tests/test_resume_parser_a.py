@@ -798,6 +798,7 @@ class TestResumeViewSetActions(TestCase):
                     '/api/talent/resumes/bulk-upload/',
                     {
                         'target_job_role': role.pk,
+                        'hiring_lane': 'client_billable',
                         'source_type': 'bulk_upload',
                         'files': [f],
                     },
@@ -809,6 +810,7 @@ class TestResumeViewSetActions(TestCase):
         self.assertEqual(resp.data['total_count'], 1)
         self.assertEqual(resp.data['processed_count'], 0)
         batch = ResumeImportBatch.objects.get(pk=resp.data['id'])
+        self.assertEqual(batch.hiring_lane, 'client_billable')
         item = ResumeImportItem.objects.get(batch=batch)
         self.assertEqual(item.document_type, 'txt')
         mock_delay.assert_called_once_with(item.pk)
@@ -818,8 +820,10 @@ class TestResumeViewSetActions(TestCase):
 
         candidate = Candidate.objects.get(phone_normalized='9876543219')
         self.assertEqual(candidate.target_job_role_id, role.pk)
+        self.assertEqual(candidate.hiring_lane, 'client_billable')
         resume = Resume.objects.get(candidate=candidate)
         self.assertEqual(resume.target_job_role_id, role.pk)
+        self.assertEqual(resume.hiring_lane, 'client_billable')
         self.assertEqual(resume.document_type, 'txt')
         self.assertEqual(resume.parser_engine, 'deterministic_v1')
         self.assertEqual(resume.status, 'indexed')
@@ -842,6 +846,46 @@ class TestResumeViewSetActions(TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['id'], candidate.pk)
 
+    def test_bulk_upload_requires_hiring_lane_and_validates_role_lane(self):
+        role = JobRole.objects.create(
+            org=self.org,
+            name='Internal Recruiter',
+            code='internal-recruiter-rp',
+            skill_category='skilled',
+            hiring_lane='internal_non_billable',
+        )
+        f = SimpleUploadedFile(
+            'candidate.txt',
+            b'Candidate\nPhone: 9876543299\nRecruiter with 5 years experience',
+            content_type='text/plain',
+        )
+
+        missing = self.client.post(
+            '/api/talent/resumes/bulk-upload/',
+            {
+                'target_job_role': role.pk,
+                'source_type': 'bulk_upload',
+                'files': [f],
+            },
+            format='multipart',
+        )
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn('hiring_lane', missing.data)
+
+        f.seek(0)
+        mismatch = self.client.post(
+            '/api/talent/resumes/bulk-upload/',
+            {
+                'target_job_role': role.pk,
+                'hiring_lane': 'client_billable',
+                'source_type': 'bulk_upload',
+                'files': [f],
+            },
+            format='multipart',
+        )
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertIn('target_job_role', mismatch.data)
+
     def test_excel_import_csv_tags_candidate_to_role(self):
         role = JobRole.objects.create(
             org=self.org,
@@ -862,6 +906,7 @@ class TestResumeViewSetActions(TestCase):
             '/api/talent/resumes/excel-import/',
             {
                 'target_job_role': role.pk,
+                'hiring_lane': 'client_billable',
                 'source_type': 'excel_import',
                 'file': csv_file,
             },
@@ -873,8 +918,10 @@ class TestResumeViewSetActions(TestCase):
         self.assertEqual(resp.data['document_type'], 'csv')
         candidate = Candidate.objects.get(phone_normalized='9876543220')
         self.assertEqual(candidate.target_job_role_id, role.pk)
+        self.assertEqual(candidate.hiring_lane, 'client_billable')
         self.assertEqual(candidate.skills.count(), 2)
         batch = ResumeImportBatch.objects.get(pk=resp.data['batch_id'])
+        self.assertEqual(batch.hiring_lane, 'client_billable')
         self.assertEqual(batch.document_type, 'csv')
         self.assertTrue(batch.import_file.name.endswith('.csv'))
         item = ResumeImportItem.objects.get(batch=batch)

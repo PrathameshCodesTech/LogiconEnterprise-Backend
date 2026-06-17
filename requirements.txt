@@ -10,6 +10,7 @@ qrcode[pil]>=7.4
 celery>=5.3
 redis>=5.0
 pypdf>=4.0
+reportlab>=4.0
 python-docx>=1.1
 openpyxl>=3.1
 openai>=1.30
