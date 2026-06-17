@@ -307,6 +307,34 @@ class TestRequestedByTypeEnforcement(TestCase):
         self.assertEqual(mrf.billing_type, 'billable')
         self.assertTrue(mrf.client_visible)
 
+    def test_client_facing_user_patch_non_billable_is_forced_billable(self):
+        mrf = ManpowerRequest.objects.create(
+            org=self.org,
+            site=self.site,
+            requested_by=self.client_user,
+            mrf_type='new_hiring',
+            billing_type='billable',
+            requested_by_type='client',
+            client_visible=True,
+            status='draft',
+        )
+
+        resp = self._api(self.client_user).patch(
+            f'{MRF_URL}{mrf.pk}/',
+            {
+                'requested_by_type': 'internal',
+                'billing_type': 'non_billable',
+                'client_visible': False,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        mrf.refresh_from_db()
+        self.assertEqual(mrf.requested_by_type, 'client')
+        self.assertEqual(mrf.billing_type, 'billable')
+        self.assertTrue(mrf.client_visible)
+
     def test_client_facing_user_mrf_clears_department_fields(self):
         dept = Department.objects.create(
             org=self.org,
