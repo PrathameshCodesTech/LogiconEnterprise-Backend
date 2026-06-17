@@ -23,8 +23,8 @@ class Command(BaseCommand):
             'seed',
             nargs='?',
             default='foundation',
-            choices=['foundation', 'masters', 'config', 'survey', 'workflows'],
-            help='ServerUAT seed to run. Currently available: foundation, masters, config, survey, workflows.',
+            choices=['foundation', 'masters', 'config', 'survey', 'workflows', 'qrcode'],
+            help='ServerUAT seed to run. Currently available: foundation, masters, config, survey, workflows, qrcode.',
         )
 
     def handle(self, *args, **options):
@@ -43,6 +43,9 @@ class Command(BaseCommand):
             return
         if seed_name == 'workflows':
             self._run_seed_file('seed_workflows.py')
+            return
+        if seed_name == 'qrcode':
+            self._run_seed_file('seed_qrcode.py')
             return
         raise CommandError(f'Unknown ServerUAT seed: {seed_name}')
 
