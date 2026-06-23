@@ -23,8 +23,14 @@ class Command(BaseCommand):
             'seed',
             nargs='?',
             default='foundation',
-            choices=['foundation', 'masters', 'config', 'survey', 'workflows', 'qrcode', 'client_portals'],
-            help='ServerUAT seed to run. Currently available: foundation, masters, config, survey, workflows, qrcode, client_portals.',
+            choices=[
+                'foundation', 'masters', 'config', 'survey', 'workflows', 'qrcode',
+                'client_portals', 'sales_test_users',
+            ],
+            help=(
+                'ServerUAT seed to run. Currently available: foundation, masters, config, '
+                'survey, workflows, qrcode, client_portals, sales_test_users.'
+            ),
         )
 
     def handle(self, *args, **options):
@@ -49,6 +55,9 @@ class Command(BaseCommand):
             return
         if seed_name == 'client_portals':
             self._run_seed_file('seed_client_portals.py')
+            return
+        if seed_name == 'sales_test_users':
+            self._run_seed_file('seed_sales_test_users.py')
             return
         raise CommandError(f'Unknown ServerUAT seed: {seed_name}')
 
