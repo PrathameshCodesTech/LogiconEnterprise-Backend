@@ -1,7 +1,7 @@
 """
 ServerUAT isolated client-portal seed.
 
-Creates three independent post-onboarding UAT clients. Each client has its own
+Creates independent post-onboarding UAT clients. Each client has its own
 client scope, site scope, billable budget, six approved site roles, and one
 client-admin login. This seed is intentionally for portal/MRF UAT only: it
 does not create fictional sales leads, proposals, or mobilisation history.
@@ -21,40 +21,88 @@ WAGE_LOCATION_CODE = "pune_metro"
 
 PORTALS = [
     {
-        "key": "a",
-        "client_name": "Client Portal UAT A",
-        "client_code": "client-portal-uat-a",
-        "site_name": "Client Portal UAT A Main Site",
-        "site_code": "client-portal-uat-a-main",
-        "email": "client.portal.a@logicon.local",
-        "username": "client.portal.a",
-        "first_name": "Client",
-        "last_name": "Portal A",
-        "phone": "9000010001",
+        "key": "vijay-more",
+        "client_name": "Vijay More Client UAT",
+        "client_code": "client-portal-vijay-more",
+        "site_name": "Vijay More Main Site",
+        "site_code": "client-portal-vijay-more-main",
+        "email": "vijay.more@client-uat.local",
+        "username": "vijay.more",
+        "first_name": "Vijay",
+        "last_name": "More",
+        "phone": "9000020001",
     },
     {
-        "key": "b",
-        "client_name": "Client Portal UAT B",
-        "client_code": "client-portal-uat-b",
-        "site_name": "Client Portal UAT B Main Site",
-        "site_code": "client-portal-uat-b-main",
-        "email": "client.portal.b@logicon.local",
-        "username": "client.portal.b",
-        "first_name": "Client",
-        "last_name": "Portal B",
-        "phone": "9000010002",
+        "key": "dular-chand",
+        "client_name": "Dular Chand Client UAT",
+        "client_code": "client-portal-dular-chand",
+        "site_name": "Dular Chand Main Site",
+        "site_code": "client-portal-dular-chand-main",
+        "email": "dular.chand@client-uat.local",
+        "username": "dular.chand",
+        "first_name": "Dular",
+        "last_name": "Chand",
+        "phone": "9000020002",
     },
     {
-        "key": "c",
-        "client_name": "Client Portal UAT C",
-        "client_code": "client-portal-uat-c",
-        "site_name": "Client Portal UAT C Main Site",
-        "site_code": "client-portal-uat-c-main",
-        "email": "client.portal.c@logicon.local",
-        "username": "client.portal.c",
-        "first_name": "Client",
-        "last_name": "Portal C",
-        "phone": "9000010003",
+        "key": "murli-krishan",
+        "client_name": "Murli Krishan Client UAT",
+        "client_code": "client-portal-murli-krishan",
+        "site_name": "Murli Krishan Main Site",
+        "site_code": "client-portal-murli-krishan-main",
+        "email": "murli.krishan@client-uat.local",
+        "username": "murli.krishan",
+        "first_name": "Murli",
+        "last_name": "Krishan",
+        "phone": "9000020003",
+    },
+    {
+        "key": "jeevan-chowdhary",
+        "client_name": "Jeevan Chowdhary Client UAT",
+        "client_code": "client-portal-jeevan-chowdhary",
+        "site_name": "Jeevan Chowdhary Main Site",
+        "site_code": "client-portal-jeevan-chowdhary-main",
+        "email": "jeevan.chowdhary@client-uat.local",
+        "username": "jeevan.chowdhary",
+        "first_name": "Jeevan",
+        "last_name": "Chowdhary",
+        "phone": "9000020004",
+    },
+    {
+        "key": "nitin-hatkar",
+        "client_name": "Nitin Hatkar Client UAT",
+        "client_code": "client-portal-nitin-hatkar",
+        "site_name": "Nitin Hatkar Main Site",
+        "site_code": "client-portal-nitin-hatkar-main",
+        "email": "nitin.hatkar@client-uat.local",
+        "username": "nitin.hatkar",
+        "first_name": "Nitin",
+        "last_name": "Hatkar",
+        "phone": "9000020005",
+    },
+    {
+        "key": "ganesh-kumbhar",
+        "client_name": "Ganesh Kumbhar Client UAT",
+        "client_code": "client-portal-ganesh-kumbhar",
+        "site_name": "Ganesh Kumbhar Main Site",
+        "site_code": "client-portal-ganesh-kumbhar-main",
+        "email": "ganesh.kumbhar@client-uat.local",
+        "username": "ganesh.kumbhar",
+        "first_name": "Ganesh",
+        "last_name": "Kumbhar",
+        "phone": "9000020006",
+    },
+    {
+        "key": "suresh-chavan",
+        "client_name": "Suresh Chavan Client UAT",
+        "client_code": "client-portal-suresh-chavan",
+        "site_name": "Suresh Chavan Main Site",
+        "site_code": "client-portal-suresh-chavan-main",
+        "email": "suresh.chavan@client-uat.local",
+        "username": "suresh.chavan",
+        "first_name": "Suresh",
+        "last_name": "Chavan",
+        "phone": "9000020007",
     },
 ]
 
@@ -80,7 +128,7 @@ REQUIRED_CLIENT_CAPABILITIES = {
 
 class Command(BaseCommand):
     help = (
-        "Seed three isolated ServerUAT client portals with site MRF test data "
+        "Seed isolated ServerUAT client portals with site MRF test data "
         "and one client-admin login per client."
     )
 
@@ -105,7 +153,7 @@ class Command(BaseCommand):
             )
 
         self.stdout.write(self.style.SUCCESS("\n[OK] ServerUAT client portal seed complete.\n"))
-        self.stdout.write("  Login password for all three UAT users: ClientUAT@2026\n")
+        self.stdout.write("  Login password for all UAT users: ClientUAT@2026\n")
 
     def _load_prerequisites(self):
         from apps.access.models import AccessRole, AccessRolePermission
